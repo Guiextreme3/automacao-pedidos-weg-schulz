@@ -15,6 +15,9 @@ senhas.*
 pedidos_pdf/
 *.pdf
 *.PDF
+*.xlsx
+*.xls
+*.csv
 
 # Planilhas com dados comerciais / pedidos soltos
 f - *.xlsx
