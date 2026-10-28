@@ -1,0 +1,55 @@
+# ===============================================
+# ARQUIVOS SENSÍVEIS E CREDENCIAIS (CONFIDENCIAL)
+# ===============================================
+.env
+.env.*
+!.env.example
+senhas
+senhas.*
+*.pem
+*.key
+
+# ===============================================
+# DADOS DE CLIENTES E PEDIDOS (CONFIDENCIAL)
+# ===============================================
+pedidos_pdf/
+*.pdf
+*.PDF
+
+# Planilhas com dados comerciais / pedidos soltos
+f - *.xlsx
+WEG DI *.xlsx
+Schulz FeedBack *.xlsx
+Pedidos_com_Serial_ME_para_Corrigir.xlsx
+pedidos_whatsapp.txt
+itens_nao_localizados*.txt
+
+# ===============================================
+# PYTHON / COMPILAÇÃO / CACHE
+# ===============================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.spec
+build/
+dist/
+*.exe
+
+# Ambientes virtuais
+venv/
+env/
+.venv/
+ENV/
+
+# Arquivos de IDE e Sistema Operacional
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Backups
+*_backup.py
+*.bak

@@ -1,0 +1,215 @@
+{
+    "contrato": "Contrato Kanban WEG Blumenau — LF Máquinas",
+    "validade": "31/08/2027",
+    "comprador": "Rafael Krause — Departamento de Suprimentos",
+    "empresa": "WEG Equipamentos Elétricos S.A. — Transformadores",
+    "unidades_cnpj": {
+        "07175725004238": {
+            "cnpj_formatado": "07.175.725/0042-38",
+            "unidade": "WEG Transformadores — Blumenau SC",
+            "orcamento_padrao": "42845610",
+            "frete_padrao": "FOB",
+            "transportadora": "Conforme pedido / indicação WEG",
+            "regra_preco": "pro_emprego"
+        },
+        "07175725001484": {
+            "cnpj_formatado": "07.175.725/0014-84",
+            "unidade": "WEG Transmissão e Distribuição — Fábrica Blumenau SC",
+            "orcamentos_referencia": ["42845403", "42845601"],
+            "frete_padrao": "CIF",
+            "transportadora": "DISK E TENHA EXPRESS",
+            "regra_preco": "pro_emprego"
+        },
+        "07175725003002": {
+            "cnpj_formatado": "07.175.725/0030-02",
+            "unidade": "WEG Equipamentos Elétricos — Gravataí RS",
+            "orcamento_padrao": "42845623",
+            "frete_padrao": "CIF",
+            "transportadora": "TRD - TRANSPORTE E LOGISTICA LTDA",
+            "regra_preco": "bruto_4"
+        }
+    },
+    "regras_tributarias": {
+        "pro_emprego": "Coluna E: Preço líquido LF SC no Pró-Emprego (aplicável a SC / Blumenau)",
+        "liquido_referencia": "Coluna F: Preço líquido de referência",
+        "bruto_12": "Coluna G: Preço bruto para Itajaí, GCV e Betim com ICMS 12%",
+        "bruto_4": "Coluna H: Preço bruto para Itajaí, GCV e Betim com ICMS 4% (interestadual)"
+    },
+    "links_referencia": {
+        "planilha_principal_contrato": "https://docs.google.com/spreadsheets/d/1jcNOUJnadXVOORAsvc3wpiWGu1HkKo6R/edit?usp=sharing",
+        "orcamento_42845610_blumenau_fob": "https://drive.google.com/file/d/1zmcW3HeT5FSPWCEO4myDqQCur99lQTt/view?usp=sharing",
+        "referencia_betim_mg": "https://drive.google.com/file/d/1K2vmCgHhy_QWyHL_RAjFYmWp2zKWl1Ki/view?usp=sharing",
+        "orcamento_blumenau_cif_disk_tenha": "https://drive.google.com/file/d/15pcrrvSsn1SHKeVuEY6aIAbZRELoXwer/view?usp=sharing",
+        "referencia_gravatai_rs": "https://drive.google.com/file/d/1mYGER5CVLRhSamU0wOBVJBU59N64BT8M/view?usp=sharing"
+    },
+    "itens": [
+        {
+            "codigo_sap": "50019984",
+            "codigo_lf": "57814",
+            "descricao": "Marcadores industriais 2 mm, bisnaga 60 ml, branco 7301278 — Baden",
+            "unidade": "UN",
+            "consumo_mensal": 108,
+            "marca": "Baden",
+            "precos": {
+                "pro_emprego": 7.62,
+                "liquido": 6.92,
+                "bruto_12": 8.66,
+                "bruto_4": 7.94
+            }
+        },
+        {
+            "codigo_sap": "50006603",
+            "codigo_lf": "57812",
+            "descricao": "Marcadores industriais 2 mm, bisnaga 60 ml, amarelo — Baden",
+            "unidade": "UN",
+            "consumo_mensal": 110,
+            "marca": "Baden",
+            "precos": {
+                "pro_emprego": 7.62,
+                "liquido": 6.92,
+                "bruto_12": 8.66,
+                "bruto_4": 7.94
+            }
+        },
+        {
+            "codigo_sap": "50006604",
+            "codigo_lf": "57813",
+            "descricao": "Marcadores industriais 2 mm, bisnaga 60 ml, azul — Baden",
+            "unidade": "UN",
+            "consumo_mensal": 1,
+            "marca": "Baden",
+            "precos": {
+                "pro_emprego": 7.62,
+                "liquido": 6.92,
+                "bruto_12": 8.66,
+                "bruto_4": 7.94
+            }
+        },
+        {
+            "codigo_sap": "50012246",
+            "codigo_lf": "57816",
+            "descricao": "Marcadores industriais 2 mm, bisnaga 60 ml, verde — Baden",
+            "unidade": "UN",
+            "consumo_mensal": 1,
+            "marca": "Baden",
+            "precos": {
+                "pro_emprego": 7.62,
+                "liquido": 6.92,
+                "bruto_12": 8.66,
+                "bruto_4": 7.94
+            }
+        },
+        {
+            "codigo_sap": "50025459",
+            "codigo_lf": "57817",
+            "descricao": "Marcadores industriais 2 mm, bisnaga 60 ml, vermelho — Baden",
+            "unidade": "UN",
+            "consumo_mensal": 37,
+            "marca": "Baden",
+            "precos": {
+                "pro_emprego": 7.62,
+                "liquido": 6.92,
+                "bruto_12": 8.66,
+                "bruto_4": 7.94
+            }
+        },
+        {
+            "codigo_sap": "10153579",
+            "codigo_lf": "47246",
+            "descricao": "Eletrodo C-Si-Mn 2,5 mm E7018 ESAB — OK 48.04",
+            "unidade": "KG",
+            "consumo_mensal": 1,
+            "marca": "ESAB",
+            "precos": {
+                "pro_emprego": 50.92,
+                "liquido": 46.21,
+                "bruto_12": 57.86,
+                "bruto_4": 53.04
+            }
+        },
+        {
+            "codigo_sap": "13165250",
+            "codigo_lf": "9085",
+            "descricao": "Trena 3 metros com trava — Lufkin ou Starrett",
+            "unidade": "UN",
+            "consumo_mensal": 104,
+            "marca": "LUFKIN",
+            "precos": {
+                "pro_emprego": 7.83,
+                "liquido": 7.11,
+                "bruto_12": 8.90,
+                "bruto_4": 8.16
+            }
+        },
+        {
+            "codigo_sap": "10656572",
+            "codigo_lf": "43167",
+            "descricao": "Trena 5 metros com trava — Starrett",
+            "unidade": "UN",
+            "consumo_mensal": 141,
+            "marca": "STARRETT",
+            "precos": {
+                "pro_emprego": 16.00,
+                "liquido": 14.52,
+                "bruto_12": 18.18,
+                "bruto_4": 16.67
+            }
+        },
+        {
+            "codigo_sap": "50042604",
+            "codigo_lf": "11186",
+            "descricao": "Disco de corte 12 × 3,2 × 1 Bosch — ref. 2 608 600 516",
+            "unidade": "UN",
+            "consumo_mensal": 28,
+            "marca": "BOSCH",
+            "precos": {
+                "pro_emprego": 23.03,
+                "liquido": 20.90,
+                "bruto_12": 26.17,
+                "bruto_4": 23.99
+            }
+        },
+        {
+            "codigo_sap": "10150815",
+            "codigo_lf": "7380",
+            "descricao": "Fluxo para solda prata Brastak/Oxigen — pote 250 g",
+            "unidade": "UN",
+            "consumo_mensal": 10,
+            "marca": "Oxigen",
+            "precos": {
+                "pro_emprego": 27.76,
+                "liquido": 25.19,
+                "bruto_12": 31.55,
+                "bruto_4": 28.92
+            }
+        },
+        {
+            "codigo_sap": "10394002",
+            "codigo_lf": "49098",
+            "descricao": "Fluxo solda E 10.71 — pacote 25 kg — ESAB",
+            "unidade": "KG",
+            "consumo_mensal": 258,
+            "marca": "ESAB",
+            "precos": {
+                "pro_emprego": 16.30,
+                "liquido": 14.79,
+                "bruto_12": 18.52,
+                "bruto_4": 16.98
+            }
+        },
+        {
+            "codigo_sap": "50006490",
+            "codigo_lf": "1084910012",
+            "descricao": "Escova cilíndrica trançada inox, com furo 22,2 × 115 — Norton, ref. 69957307755",
+            "unidade": "UN",
+            "consumo_mensal": 146,
+            "marca": "Norton",
+            "precos": {
+                "pro_emprego": 43.50,
+                "liquido": 39.48,
+                "bruto_12": 49.43,
+                "bruto_4": 45.31
+            }
+        }
+    ]
+}
