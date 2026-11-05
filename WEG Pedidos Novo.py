@@ -168,6 +168,8 @@ class AutomacaoPedidosApp:
         self.mapa_blumenau_sap = {}
         self.dados_pedido_atual = {}
         self.itens_desconto_35 = []
+        self.itens_preco_maior = []
+        self.numeros_pedidos_lf_gerados = []
         self.pedidos_nao_lidos = []
         self.transparencia_ativa = True
         self.alpha_padrao = 0.85
@@ -1134,6 +1136,193 @@ class AutomacaoPedidosApp:
             self.root.wait_window(top)
         self._run_on_ui(_show_aviso)
 
+    def extrair_numero_pedido_lf(self):
+        """
+        Tenta capturar o número do pedido gerado no ERP LF (geralmente 8 dígitos começando com 42, ex: 42845610).
+        Varre inputs, spans, breadcrumbs, títulos e a URL do navegador.
+        """
+        if not getattr(self, 'driver_lf', None):
+            return ""
+        try:
+            self.driver_lf.switch_to.default_content()
+            js_code = """
+            try {
+                // 1. Procura em inputs específicos de identificação do pedido
+                var sel = "input[id*='PEDIDO'], input[id*='ORDER'], input[id*='NUMERO'], input[id*='DOCUMENTNO'], [id*='C_ORDER_ID'], [id*='NRO_PEDIDO']";
+                var inputs = document.querySelectorAll(sel);
+                for (var i = 0; i < inputs.length; i++) {
+                    var v = (inputs[i].value || "").trim();
+                    var m = v.match(/\b(42\d{6}|\d{7,9})\b/);
+                    if (m) return m[1];
+                }
+                
+                // 2. Procura em títulos, cabeçalhos e breadcrumbs da página
+                var headings = document.querySelectorAll("h1, h2, .t-Breadcrumb-label, .t-Region-title, .t-Header-branding, .t-HeroRegion-title, #apexPageMessage, .t-Alert-content");
+                for (var h = 0; h < headings.length; h++) {
+                    var txt = (headings[h].innerText || headings[h].textContent || "").trim();
+                    var m2 = txt.match(/\b(42\d{6})\b/);
+                    if (m2) return m2[1];
+                }
+                
+                // 3. Procura no corpo da página em padrões como "Pedido: 42845610" ou "Orçamento: 42845610"
+                var bText = document.body ? (document.body.innerText || "") : "";
+                var m3 = bText.match(/(?:pedido|or[çc]amento|venda)\s*(?:n[ºo\.]*|[:#])?\s*(\d{7,9})/i);
+                if (m3) return m3[1];
+                
+                // 4. Procura na URL atual
+                var mUrl = window.location.href.match(/\b(42\d{6})\b/);
+                if (mUrl) return mUrl[1];
+                
+                return "";
+            } catch(e) {
+                return "";
+            }
+            """
+            num_lf = self.driver_lf.execute_script(js_code)
+            if num_lf:
+                return str(num_lf).strip()
+        except Exception as e:
+            print(f"Aviso ao tentar capturar número pedido LF: {e}")
+        return ""
+
+    def montar_mensagem_preco_maior(self, lista_itens):
+        """
+        Monta a mensagem formatada para envio no WhatsApp detalhando
+        os itens onde o preço no pedido (Y) veio MAIOR que o contrato (X).
+        """
+        num_weg = str(getattr(self, 'numero_pedido_atual', '')).strip() or "N/A"
+        
+        nums_lf = []
+        for n in getattr(self, "numeros_pedidos_lf_gerados", []):
+            if n and str(n) not in nums_lf:
+                nums_lf.append(str(n))
+        num_lf_str = " / ".join(nums_lf) if nums_lf else ""
+        txt_lf = f"🏢 *Pedido LF:* {num_lf_str}" if num_lf_str else "🏢 *Pedido LF:* (Verificar no LF)"
+        
+        linhas = []
+        linhas.append("⚠️ *DIVERGÊNCIA DE PREÇO (PEDIDO > CONTRATO)*\n")
+        linhas.append(f"📦 *Pedido WEG (OC):* {num_weg}")
+        linhas.append(txt_lf)
+        linhas.append("──────────────────────────\n")
+        
+        for idx, it in enumerate(lista_itens, 1):
+            item_oc = it.get("numero_oc", "")
+            cod_lf = it.get("codigo_lf", "") or "Sem Cód LF"
+            cod_weg = it.get("codigo_weg", "")
+            desc = (it.get("descricao", "") or "").strip()
+            prc_contrato = it.get("preco_contrato", "")
+            prc_pedido = it.get("preco_pedido", "")
+            diff = it.get("diferenca", 0.0)
+            origem = it.get("origem_contrato", "Contrato")
+            diff_str = f"{diff:.2f}".replace('.', ',')
+            
+            linhas.append(f"*{idx}. Item OC: {item_oc} | Cód LF (Catálogo): {cod_lf}*")
+            if cod_weg:
+                linhas.append(f"   • Cód WEG: {cod_weg}")
+            if desc:
+                desc_c = desc if len(desc) <= 50 else desc[:47] + "..."
+                linhas.append(f"   • Descrição: {desc_c}")
+            linhas.append(f"   • 📋 No {origem} (X): R$ {prc_contrato}")
+            linhas.append(f"   • 📈 No Pedido (Y): R$ {prc_pedido} *(+R$ {diff_str})*\n")
+            
+        linhas.append("──────────────────────────")
+        linhas.append("📌 *Obs:* O valor maior do pedido (Y) foi mantido no LF.")
+        return "\n".join(linhas)
+
+    def mostrar_aviso_preco_maior(self, lista_itens):
+        """
+        Exibe uma janela com a mensagem pronta para envio no WhatsApp
+        e um botão para copiar todo o texto para a área de transferência.
+        """
+        if not lista_itens:
+            return
+            
+        mensagem = self.montar_mensagem_preco_maior(lista_itens)
+        
+        def _show_aviso():
+            self.force_top_window()
+            top = tk.Toplevel(self.root)
+            top.title("Aviso: Preço no Pedido MAIOR que Contrato (Y > X)")
+            top.attributes('-topmost', True)
+            
+            ws = self.screen_width
+            hs = self.screen_height
+            w, h = 560, 420
+            x = int((ws/2) - (w/2))
+            y = int((hs/2) - (h/2))
+            top.geometry(f"{w}x{h}+{x}+{y}")
+            top.config(bg="#F8FAFC")
+            
+            # Cabeçalho de Alerta
+            header = tk.Frame(top, bg="#FEF3C7", padx=15, pady=12)
+            header.pack(fill=tk.X)
+            
+            tk.Label(
+                header,
+                text="⚠️ DIVERGÊNCIA: PREÇO PEDIDO > CONTRATO",
+                font=("Segoe UI", 11, "bold"),
+                fg="#B45309",
+                bg="#FEF3C7"
+            ).pack(anchor="w")
+            
+            tk.Label(
+                header,
+                text="O valor no pedido veio maior do que na tabela. Mensagem formatada para o seu pai:",
+                font=("Segoe UI", 9),
+                fg="#78350F",
+                bg="#FEF3C7"
+            ).pack(anchor="w", pady=(2, 0))
+            
+            # Caixa de texto rolável com o conteúdo
+            frame_texto = tk.Frame(top, bg="#F8FAFC", padx=15, pady=10)
+            frame_texto.pack(fill=tk.BOTH, expand=True)
+            
+            txt_box = tk.Text(
+                frame_texto,
+                wrap=tk.WORD,
+                font=("Consolas", 10),
+                bg="#FFFFFF",
+                fg="#1E293B",
+                relief="solid",
+                bd=1,
+                padx=10,
+                pady=10
+            )
+            txt_box.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            txt_box.insert("1.0", mensagem)
+            
+            scroll = tk.Scrollbar(frame_texto, command=txt_box.yview)
+            scroll.pack(side=tk.RIGHT, fill=tk.Y)
+            txt_box.config(yscrollcommand=scroll.set)
+            
+            def copiar_e_fechar():
+                self.root.clipboard_clear()
+                self.root.clipboard_append(mensagem)
+                self.root.update()
+                top.destroy()
+                
+            btn_frame = tk.Frame(top, bg="#F8FAFC", padx=15, pady=10)
+            btn_frame.pack(fill=tk.X)
+            
+            btn_copiar = tk.Button(
+                btn_frame,
+                text="📋 COPIAR MENSAGEM E FECHAR",
+                font=("Segoe UI", 10, "bold"),
+                bg="#16A34A",
+                fg="white",
+                activebackground="#15803D",
+                activeforeground="white",
+                relief="flat",
+                pady=10,
+                cursor="hand2",
+                command=copiar_e_fechar
+            )
+            btn_copiar.pack(fill=tk.X)
+            
+            self.root.wait_window(top)
+            
+        self._run_on_ui(_show_aviso)
+
     def detectar_erro_lote_minimo(self):
         """
         Verifica se há erro ou aviso de lote mínimo na tela do LF
@@ -1896,6 +2085,8 @@ class AutomacaoPedidosApp:
         
         self.numero_pedido_atual = numero
         self.itens_desconto_35 = []
+        self.itens_preco_maior = []
+        self.numeros_pedidos_lf_gerados = []
         
         # Se o pedido estava na lista de não lidos, remove para avançar a fila
         if hasattr(self, 'pedidos_nao_lidos') and numero in self.pedidos_nao_lidos:
@@ -2092,6 +2283,18 @@ class AutomacaoPedidosApp:
             except Exception as _e_ref:
                 print(f"Aviso ao atualizar lista WEG pós-pedido: {_e_ref}")
             
+            # Tenta capturar novamente número LF ao final caso tenha ficado disponível
+            try:
+                num_lf_final = self.extrair_numero_pedido_lf()
+                if num_lf_final and num_lf_final not in self.numeros_pedidos_lf_gerados:
+                    self.numeros_pedidos_lf_gerados.append(num_lf_final)
+            except Exception:
+                pass
+
+            # --- MOSTRAR AVISO DE PREÇO NO PEDIDO MAIOR QUE O CONTRATO (Y > X) ---
+            if self.itens_preco_maior:
+                self.mostrar_aviso_preco_maior(self.itens_preco_maior)
+
             # --- MOSTRAR AVISO DE ITENS COM MAIS DE 35% DE DESCONTO NO FINAL ---
             if self.itens_desconto_35:
                 def formatar_lista_portugues(lista):
@@ -2387,11 +2590,33 @@ class AutomacaoPedidosApp:
 
                         if preco_selecionado:
                             preco_orig_str = item["preco"]
-                            item["preco_original"] = preco_orig_str
-                            item["preco"] = preco_selecionado
-                            item["foi_corrigido"] = True
-                            teve_correcao = True
-                            print(f"  > [TABELA] Item {item['numero_weg']} (Cód: {cod_norm}): Preço alterado de {preco_orig_str} para {preco_selecionado} via {origem_preco}")
+                            val_pedido = self._converter_para_float(preco_orig_str)
+                            val_tabela = self._converter_para_float(preco_selecionado)
+                            
+                            if val_tabela > 0 and val_pedido > 0 and val_pedido > (val_tabela + 0.0001):
+                                # Preço no pedido (Y) é MAIOR que na tabela/contrato (X).
+                                # Mantém o valor maior do pedido no LF e registra para aviso
+                                print(f"  ⚠️ [PREÇO MAIOR] Item {item['numero_weg']} (Cód: {cod_norm}): Pedido R$ {val_pedido:.2f} > Contrato R$ {val_tabela:.2f} (X < Y). Mantendo valor do pedido.")
+                                item["preco_contrato"] = preco_selecionado
+                                item["divergencia_preco_maior"] = True
+                                self.itens_preco_maior.append({
+                                    "numero_oc": item.get("numero_weg", "10"),
+                                    "codigo_weg": item.get("codigo_produto", "") or cod_norm,
+                                    "codigo_lf": codigo_lf_selecionado or item.get("codigo_lf", ""),
+                                    "descricao": item.get("descricao", "") or item.get("desc", ""),
+                                    "preco_contrato": preco_selecionado,
+                                    "origem_contrato": "Contrato",
+                                    "preco_pedido": preco_orig_str,
+                                    "val_contrato": val_tabela,
+                                    "val_pedido": val_pedido,
+                                    "diferenca": val_pedido - val_tabela
+                                })
+                            else:
+                                item["preco_original"] = preco_orig_str
+                                item["preco"] = preco_selecionado
+                                item["foi_corrigido"] = True
+                                teve_correcao = True
+                                print(f"  > [TABELA] Item {item['numero_weg']} (Cód: {cod_norm}): Preço alterado de {preco_orig_str} para {preco_selecionado} via {origem_preco}")
                             
                         if codigo_lf_selecionado:
                             item["codigo_lf"] = codigo_lf_selecionado
@@ -2433,11 +2658,32 @@ class AutomacaoPedidosApp:
                                     origem_b = "Contrato Blumenau (Pró-Emprego SC)"
                             
                             if preco_b:
-                                item["preco_original"] = item.get("preco")
-                                item["preco"] = preco_b
-                                item["foi_corrigido"] = True
-                                teve_correcao = True
-                                print(f"  > [KANBAN BLUMENAU] Item {item['numero_weg']} (Cód SAP: {cod_norm}): Preço alterado para {preco_b} via {origem_b}")
+                                preco_orig_str = item.get("preco", "")
+                                val_pedido = self._converter_para_float(preco_orig_str)
+                                val_tabela_b = self._converter_para_float(preco_b)
+                                
+                                if val_tabela_b > 0 and val_pedido > 0 and val_pedido > (val_tabela_b + 0.0001):
+                                    print(f"  ⚠️ [KANBAN BLUMENAU - PREÇO MAIOR] Item {item['numero_weg']} (Cód SAP: {cod_norm}): Pedido R$ {val_pedido:.2f} > Contrato R$ {val_tabela_b:.2f}. Mantendo valor do pedido.")
+                                    item["preco_contrato"] = preco_b
+                                    item["divergencia_preco_maior"] = True
+                                    self.itens_preco_maior.append({
+                                        "numero_oc": item.get("numero_weg", "10"),
+                                        "codigo_weg": item.get("codigo_produto", "") or cod_norm,
+                                        "codigo_lf": b_item.get("codigo_lf", "") or item.get("codigo_lf", ""),
+                                        "descricao": item.get("descricao", "") or b_item.get("descricao", ""),
+                                        "preco_contrato": preco_b,
+                                        "origem_contrato": "Contrato Kanban",
+                                        "preco_pedido": preco_orig_str,
+                                        "val_contrato": val_tabela_b,
+                                        "val_pedido": val_pedido,
+                                        "diferenca": val_pedido - val_tabela_b
+                                    })
+                                else:
+                                    item["preco_original"] = preco_orig_str
+                                    item["preco"] = preco_b
+                                    item["foi_corrigido"] = True
+                                    teve_correcao = True
+                                    print(f"  > [KANBAN BLUMENAU] Item {item['numero_weg']} (Cód SAP: {cod_norm}): Preço alterado para {preco_b} via {origem_b}")
 
             if teve_correcao:
                 novo_total = sum(self._converter_para_float(it.get("qtd", 0)) * self._converter_para_float(it.get("preco", 0)) for it in dados_extraidos.get("itens", []))
@@ -2860,6 +3106,16 @@ class AutomacaoPedidosApp:
             self.driver_lf.switch_to.default_content()
             self.wait_for_apex_ready(self.driver_lf)
             print("✅ Foco retornado para a página principal do LF. Cabeçalho salvo.")
+            
+            # Captura número do Pedido LF gerado
+            try:
+                time.sleep(0.3)
+                num_lf = self.extrair_numero_pedido_lf()
+                if num_lf and num_lf not in self.numeros_pedidos_lf_gerados:
+                    self.numeros_pedidos_lf_gerados.append(num_lf)
+                    print(f"  > 📋 Número do Pedido LF detectado: {num_lf}")
+            except Exception:
+                pass
 
         except Exception as e:
             self.driver_lf.switch_to.default_content() 
@@ -2903,6 +3159,11 @@ class AutomacaoPedidosApp:
                                         (By.ID, XPATHS_LF["item_popup_iframe_check"]))
                 print("  > Foco no iframe 'Itens do Pedido'.")
                 
+                # Sincroniza código LF na lista de divergência de preço se necessário
+                for it_pm in self.itens_preco_maior:
+                    if str(it_pm.get("numero_oc")) == str(item_weg.get("numero_weg")) and not it_pm.get("codigo_lf"):
+                        it_pm["codigo_lf"] = codigo_lf
+
                 self.robust_click(self.driver_lf, By.ID, XPATHS_LF["item_popup_sku_btn"])
                 
                 self.driver_lf.switch_to.default_content()
@@ -2951,6 +3212,24 @@ class AutomacaoPedidosApp:
                                     "item_oc": item_weg.get("numero_weg", "10"),
                                     "codigo": item_weg.get("codigo_produto", "")
                                 })
+                            
+                            # Se o item não veio de contrato mas o preço do pedido é maior que o catálogo LF
+                            if val_inserido > (val_sistema + 0.0001):
+                                ja_registrado = any(str(it.get("numero_oc")) == str(item_weg.get("numero_weg")) for it in self.itens_preco_maior)
+                                if not ja_registrado:
+                                    print(f"    ⚠️ [CATÁLOGO LF - PREÇO MAIOR] Item {item_weg['numero_weg']}: Pedido R$ {val_inserido:.2f} > Catálogo LF R$ {val_sistema:.2f}")
+                                    self.itens_preco_maior.append({
+                                        "numero_oc": item_weg.get("numero_weg", "10"),
+                                        "codigo_weg": item_weg.get("codigo_produto", ""),
+                                        "codigo_lf": codigo_lf or item_weg.get("codigo_lf", ""),
+                                        "descricao": item_weg.get("descricao", ""),
+                                        "preco_contrato": f"{val_sistema:.2f}".replace('.', ','),
+                                        "origem_contrato": "Catálogo LF",
+                                        "preco_pedido": item_weg['preco'],
+                                        "val_contrato": val_sistema,
+                                        "val_pedido": val_inserido,
+                                        "diferenca": val_inserido - val_sistema
+                                    })
                 except Exception as e_vl:
                     print(f"    ⚠️ Erro ao verificar desconto do item: {e_vl}")
 
