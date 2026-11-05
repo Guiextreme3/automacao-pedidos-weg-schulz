@@ -75,10 +75,33 @@ _STOPWORDS = {
     "DESC", "COD", "CODIGO", "ITEM", "QTD", "QUANTIDADE", "PRECO", "UNITARIO", "PRAZO", "OBS",
 }
 
+# Grupos de palavras que definem categorias de produtos industriais e ferramentas.
+# Se a descrição do pedido pertence a uma categoria e o candidato pertence a outra sem nenhuma interseção,
+# trata-se de um produto completamente diferente (ex: Broca x Alicate).
+_CATEGORIAS_CONFLITO = [
+    {"BROCA"}, {"ALICATE"}, {"DISCO"}, {"MACHO"}, {"FRESA"},
+    {"LIXA"}, {"PASTILHA", "INSERT", "INSERTO"}, {"CHAVE"},
+    {"PARAFUSO"}, {"PORCA"}, {"ARRUELA"}, {"PINO"}, {"MOLA"},
+    {"CORREIA"}, {"ROLAMENTO", "ROLAM"}, {"LUVA"}, {"OCULOS"},
+    {"FITA"}, {"COLA", "ADESIVO"}, {"OLEO", "LUBRIFICANTE"},
+    {"GRAXA"}, {"TINTA"}, {"PINCEL"}, {"SERRA", "LAMINA"},
+    {"VALVULA"}, {"CONECTOR"}, {"MANGUEIRA"}, {"SOPRADOR"},
+    {"MANDRIL"}, {"PONTA", "BITS", "BIT"}, {"PAQUIMETRO"}
+]
+
 
 def _tokens(texto):
     t = unicodedata.normalize('NFKD', str(texto or "")).encode('ascii', 'ignore').decode().upper()
     return {tk for tk in re.findall(r'[A-Z0-9]+', t) if len(tk) >= 2 and tk not in _STOPWORDS}
+
+
+def ha_conflito_categoria(desc1, desc2):
+    """Retorna True se desc1 e desc2 pertencerem a categorias claramente conflitantes (ex: Broca x Alicate)."""
+    t1 = _tokens(desc1)
+    t2 = _tokens(desc2)
+    c1 = {frozenset(c) for c in _CATEGORIAS_CONFLITO if any(w in t1 for w in c)}
+    c2 = {frozenset(c) for c in _CATEGORIAS_CONFLITO if any(w in t2 for w in c)}
+    return bool(c1 and c2 and not (c1 & c2))
 
 
 def similaridade_descricao(desc_pedido, texto_candidato):
@@ -235,14 +258,34 @@ def casar_itens_pedido(itens_pedido, registro_rfq):
             por_codigo = [a for a in avaliados if a["codigo_ok"]]
             por_preco = [a for a in avaliados if a["preco_ok"]]
 
-            if len(por_codigo) == 1 and (por_codigo[0]["preco_perto"] or por_codigo[0]["similaridade"] >= 0.3):
+            # Caso 1: Código do produto bateu exatamente
+            if len(por_codigo) == 1 and (por_codigo[0]["preco_perto"] or por_codigo[0]["similaridade"] >= 0.15):
                 status, escolhido = "auto", por_codigo[0]["item"]
-            elif len(por_preco) == 1 and (por_preco[0]["similaridade"] >= 0.35 or len(avaliados) == 1):
-                status, escolhido = "auto", por_preco[0]["item"]
+
+            # Caso 2: Exatamente 1 item na RFQ inteira bateu o preço exato! (99,9% de certeza)
+            elif len(por_preco) == 1:
+                cand = por_preco[0]
+                texto_cand = " ".join(str(cand["item"].get(k, "")) for k in ("texto_rfq", "codigo_weg", "descricao_lf"))
+                # Só desconfia se as categorias forem claramente conflitantes (ex: Broca x Alicate)
+                if ha_conflito_categoria(desc_ped, texto_cand):
+                    status, escolhido = "duvida", cand["item"]
+                else:
+                    status, escolhido = "auto", cand["item"]
+
+            # Caso 3: RFQ só tem 1 item no total e o preço bateu ou é muito próximo
+            elif len(avaliados) == 1 and (avaliados[0]["preco_ok"] or avaliados[0]["preco_perto"]):
+                texto_cand = " ".join(str(avaliados[0]["item"].get(k, "")) for k in ("texto_rfq", "codigo_weg", "descricao_lf"))
+                if not ha_conflito_categoria(desc_ped, texto_cand):
+                    status, escolhido = "auto", avaliados[0]["item"]
+
+            # Caso 4: Mais de um item na RFQ tem o mesmo preço exato (ex: dois itens de R$ 50,00)
             elif len(por_preco) > 1:
                 ordenados = sorted(por_preco, key=lambda a: a["similaridade"], reverse=True)
-                if ordenados[0]["similaridade"] >= 0.5 and ordenados[0]["similaridade"] - ordenados[1]["similaridade"] >= 0.25:
+                if ordenados[0]["similaridade"] >= 0.4 and (ordenados[0]["similaridade"] - ordenados[1]["similaridade"] >= 0.2):
                     status, escolhido = "auto", ordenados[0]["item"]
+                else:
+                    # Dúvida legítima entre produtos de mesmo preço
+                    status, escolhido = "duvida", ordenados[0]["item"]
 
         resultados.append({"status": status, "escolhido": escolhido, "candidatos": avaliados})
 

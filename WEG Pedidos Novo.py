@@ -135,6 +135,20 @@ XPATHS_WEG = {
     "popup_rfq": "//td[normalize-space(.)='RFQ:']/following-sibling::td"
 }
 
+def encurtar_descricao(texto, max_len=60):
+    """Encurta e limpa descrições longas para conferência rápida e sem poluição visual."""
+    if not texto: return ""
+    s = str(texto).strip()
+    s = s.split('\n')[0].strip()
+    s = re.sub(r'\[Ver (mais|menos)\]', '', s, flags=re.I)
+    s = re.sub(r'^DESC:\s*', '', s, flags=re.I)
+    s = re.sub(r'^\d+\.\s*\d+\s*-\s*', '', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+    s = re.sub(r'^[-\s•]+', '', s)
+    if len(s) > max_len:
+        s = s[:max_len - 3] + "..."
+    return s
+
 # --- CLASSE PRINCIPAL ---
 
 class AutomacaoPedidosApp:
@@ -171,6 +185,10 @@ class AutomacaoPedidosApp:
         self.itens_preco_maior = []
         self.numeros_pedidos_lf_gerados = []
         self.pedidos_nao_lidos = []
+        self.mapa_descricoes_lf = {}
+        self.pagina_atual_weg = 1
+        self.total_paginas_weg = 1
+        self.em_execucao = False
         self.transparencia_ativa = True
         self.alpha_padrao = 0.85
         self.carregar_config()
@@ -480,17 +498,33 @@ class AutomacaoPedidosApp:
 
     # --- GESTÃO DE FILA DE PEDIDOS NÃO LIDOS WEG ---
     def extrair_pedidos_nao_lidos_portal(self):
-        """Varre a tabela de transações do Mercado Eletrônico de baixo para cima (do mais antigo para o mais novo) e extrai os números dos pedidos com status 'Não lida'."""
+        """Varre a tabela de transações do Mercado Eletrônico de baixo para cima (do mais antigo para o mais novo)
+        e extrai os números dos pedidos com status 'Não lida' da página visível, junto com a página detectada."""
         if not getattr(self, 'driver_weg', None):
-            return []
+            return {"pedidos": [], "pagina": 1, "total_paginas": 1}
         
-        pedidos = []
+        resultado = {"pedidos": [], "pagina": 1, "total_paginas": 1}
         try:
             self.driver_weg.switch_to.default_content()
             js_code = """
             var unreadList = [];
             var rows = document.querySelectorAll("table tbody tr");
-            // Varre de baixo para cima (do mais antigo para o mais novo)
+            
+            // Detecta a página ativa na paginação (BootstrapVue ou genérica)
+            var pageNum = 1;
+            var totalPages = 1;
+            var activeEl = document.querySelector(".pagination .page-item.active, .pagination .active, [aria-current='page'], .b-pagination .active");
+            if (activeEl) {
+                var pTxt = (activeEl.innerText || "").replace(/\\D/g, "");
+                if (pTxt) pageNum = parseInt(pTxt, 10);
+            }
+            var pageLinks = document.querySelectorAll(".pagination .page-link, .pagination .page-item, .b-pagination .page-item");
+            pageLinks.forEach(function(el) {
+                var num = parseInt((el.innerText || "").replace(/\\D/g, ""), 10);
+                if (!isNaN(num) && num > totalPages) totalPages = num;
+            });
+
+            // Varre de baixo para cima (do mais antigo para o mais novo na página atual)
             for (var i = rows.length - 1; i >= 0; i--) {
                 var row = rows[i];
                 var text = (row.innerText || "").toLowerCase();
@@ -503,28 +537,35 @@ class AutomacaoPedidosApp:
                 // A coluna 1 é "Serial ME" (ex: 64643483) e DEVE ser ignorada!
                 var col2 = row.querySelector("td[aria-colindex='2']") || row.querySelectorAll("td")[1];
                 if (col2) {
-                    var m = (col2.innerText || "").match(/\b(45\d{8})\b/);
+                    var m = (col2.innerText || "").match(/\\b(45\\d{8})\\b/);
                     if (m) foundNum = m[1];
                 }
                 // Fallback na linha: procura estritamente por número de 10 dígitos começando com 45
                 if (!foundNum) {
-                    var m2 = (row.innerText || "").match(/\b(45\d{8})\b/);
+                    var m2 = (row.innerText || "").match(/\\b(45\\d{8})\\b/);
                     if (m2) foundNum = m2[1];
                 }
                 if (foundNum && unreadList.indexOf(foundNum) === -1) {
                     unreadList.push(foundNum);
                 }
             }
-            return unreadList;
+            return {
+                "pedidos": unreadList,
+                "pagina": pageNum,
+                "total_paginas": totalPages
+            };
             """
             res = self.driver_weg.execute_script(js_code)
-            if res and isinstance(res, list):
-                pedidos = [str(p).strip() for p in res if str(p).strip()]
+            if res and isinstance(res, dict):
+                p_list = [str(p).strip() for p in res.get("pedidos", []) if str(p).strip()]
+                resultado["pedidos"] = p_list
+                resultado["pagina"] = int(res.get("pagina", 1))
+                resultado["total_paginas"] = int(res.get("total_paginas", 1))
         except Exception as e:
             print(f"Aviso ao extrair pedidos não lidos via JS: {e}")
 
         # Fallback via Selenium (varre de baixo para cima)
-        if not pedidos:
+        if not resultado["pedidos"]:
             try:
                 self.driver_weg.switch_to.default_content()
                 rows = self.driver_weg.find_elements(By.XPATH, "//table//tbody/tr")
@@ -542,17 +583,18 @@ class AutomacaoPedidosApp:
                                 m = re.search(r'\b(45\d{8})\b', r.text)
                                 if m:
                                     foundNum = m.group(1)
-                            if foundNum and foundNum not in pedidos:
-                                pedidos.append(foundNum)
+                            if foundNum and foundNum not in resultado["pedidos"]:
+                                resultado["pedidos"].append(foundNum)
                     except Exception:
                         pass
             except Exception:
                 pass
 
-        return pedidos
+        return resultado
 
     def atualizar_fila_pedidos(self, dar_f5=False):
-        """Atualiza a lista interna de pedidos 'Não lido' e sincroniza a interface."""
+        """Atualiza a lista interna de pedidos 'Não lido' e sincroniza a interface.
+        Se dar_f5=False, lê a tela atual sem resetar a navegação/página do usuário."""
         if not getattr(self, 'driver_weg', None):
             return
         try:
@@ -584,26 +626,95 @@ class AutomacaoPedidosApp:
                     pass
                 time.sleep(0.4)
 
-            pedidos = self.extrair_pedidos_nao_lidos_portal()
-            self.pedidos_nao_lidos = pedidos
-            print(f"Lista de pedidos 'Não lido' encontrada: {pedidos}")
+            dados_extracao = self.extrair_pedidos_nao_lidos_portal()
+            pedidos_lidos = dados_extracao.get("pedidos", [])
+            pagina = dados_extracao.get("pagina", 1)
+            self.total_paginas_weg = dados_extracao.get("total_paginas", 1)
+            self.pagina_atual_weg = pagina
+
+            fila_atual = getattr(self, 'pedidos_nao_lidos', [])
+            # Se estiver na Página 2 (ou superior), os pedidos são MAIS ANTIGOS que os da página 1!
+            # Portanto, entram como PRIORIDADE no topo da fila de execução!
+            if pagina > 1:
+                # Mantém os pedidos lidos na frente (prioridade) e depois os anteriores
+                fila_final = pedidos_lidos + [p for p in fila_atual if p not in pedidos_lidos]
+                self.pedidos_nao_lidos = fila_final
+                print(f"Pedidos da Página {pagina} (mais antigos) adicionados com PRIORIDADE: {pedidos_lidos}")
+            else:
+                if dar_f5:
+                    self.pedidos_nao_lidos = pedidos_lidos
+                else:
+                    # Preserva pedidos prioritários da página 2 que já estejam na fila
+                    prioritarios_existentes = [p for p in fila_atual if p not in pedidos_lidos]
+                    self.pedidos_nao_lidos = prioritarios_existentes + pedidos_lidos
+
+            print(f"Fila atualizada (Página {pagina} de {self.total_paginas_weg}): {self.pedidos_nao_lidos}")
         except Exception as e:
             print(f"Aviso ao buscar pedidos não lidos: {e}")
         finally:
             self.root.after(0, self._sincronizar_ui_fila_pedidos)
 
-    def atualizar_fila_pedidos_async(self):
-        """Dispara a atualização com F5 em thread separada para não travar a interface."""
+    def atualizar_fila_pedidos_async(self, dar_f5=False):
+        """Dispara a atualização em thread separada. Por padrão (dar_f5=False) lê a tela atual sem resetar a página."""
         if hasattr(self, 'btn_atualizar_fila'):
             self.btn_atualizar_fila.config(text="⏳ Buscando...", state=tk.DISABLED)
         def _task():
-            self.atualizar_fila_pedidos(dar_f5=True)
+            self.atualizar_fila_pedidos(dar_f5=dar_f5)
             self.root.after(0, lambda: getattr(self, 'btn_atualizar_fila', None) and self.btn_atualizar_fila.config(text="🔄 Atualizar", state=tk.NORMAL))
         threading.Thread(target=_task, daemon=True).start()
+
+    def carregar_pagina_2_async(self):
+        """Clica no botão da Página 2 no portal WEG e coloca os pedidos mais antigos como prioridade no início da fila."""
+        if hasattr(self, 'btn_pag2'):
+            self.btn_pag2.config(text="⏳ Pág 2...", state=tk.DISABLED)
+        
+        def _task():
+            try:
+                self.driver_weg.switch_to.default_content()
+                js_click_pag2 = """
+                var links = document.querySelectorAll(".pagination .page-link, .pagination button, .pagination a");
+                for (var i = 0; i < links.length; i++) {
+                    if (links[i].innerText.trim() === "2") {
+                        links[i].click();
+                        return true;
+                    }
+                }
+                return false;
+                """
+                clicou = self.driver_weg.execute_script(js_click_pag2)
+                if clicou:
+                    time.sleep(1.0) # Aguarda carregar dados da página 2 via Ajax
+                    self.atualizar_fila_pedidos(dar_f5=False)
+                else:
+                    print("Botão da Página 2 não localizado diretamente. Atualizando tela atual...")
+                    self.atualizar_fila_pedidos(dar_f5=False)
+            except Exception as e:
+                print(f"Erro ao navegar para Página 2: {e}")
+            finally:
+                self.root.after(0, lambda: getattr(self, 'btn_pag2', None) and self.btn_pag2.config(text="📄 Pág 2", state=tk.NORMAL))
+                
+        threading.Thread(target=_task, daemon=True).start()
+
+    def _iniciar_monitoramento_ocioso(self):
+        """Monitora periodicamente se a fila está vazia enquanto o robô está ocioso, buscando novos pedidos automaticamente."""
+        if getattr(self, 'em_execucao', False):
+            self.root.after(4000, self._iniciar_monitoramento_ocioso)
+            return
+
+        if getattr(self, 'driver_weg', None):
+            try:
+                # Se a fila estiver vazia, varre a tela atual para encontrar pedidos automaticamente
+                if not getattr(self, 'pedidos_nao_lidos', []):
+                    threading.Thread(target=lambda: self.atualizar_fila_pedidos(dar_f5=False), daemon=True).start()
+            except Exception:
+                pass
+
+        self.root.after(4000, self._iniciar_monitoramento_ocioso)
 
     def _sincronizar_ui_fila_pedidos(self):
         """Atualiza a caixa de texto, rótulos e os botões da interface conforme a fila pendente."""
         pedidos = getattr(self, 'pedidos_nao_lidos', [])
+        pag_atual = getattr(self, 'pagina_atual_weg', 1)
         if pedidos:
             prox = pedidos[0]
             # Preenche na caixa o próximo sugerido da fila (o mais antigo)
@@ -613,7 +724,10 @@ class AutomacaoPedidosApp:
 
             total = len(pedidos)
             if hasattr(self, 'lbl_fila_pedidos'):
-                self.lbl_fila_pedidos.config(text=f"📬 Não lidos: 1 de {total} (mais antigo)", fg="#0369A1")
+                if pag_atual > 1:
+                    self.lbl_fila_pedidos.config(text=f"📬 Não lidos: 1 de {total} (Pág. {pag_atual} - Prioridade)", fg="#B45309")
+                else:
+                    self.lbl_fila_pedidos.config(text=f"📬 Não lidos: 1 de {total} (mais antigo)", fg="#0369A1")
             if hasattr(self, 'btn_proximo'):
                 self.btn_proximo.config(text=f"🚀 Fazer Próximo da Fila ({prox})", bg="#16A34A", state=tk.NORMAL)
             if hasattr(self, 'btn_digitado'):
@@ -688,8 +802,12 @@ class AutomacaoPedidosApp:
         self.lbl_fila_pedidos = tk.Label(status_frame, text="📋 Nº do Pedido WEG:", font=("Segoe UI", 8, "bold"), fg="#1E293B", bg="#F8FAFC")
         self.lbl_fila_pedidos.pack(side="left")
 
-        self.btn_atualizar_fila = tk.Button(status_frame, text="🔄 Atualizar", font=("Segoe UI", 7, "bold"), bg="#E0F2FE", fg="#0369A1", activebackground="#BAE6FD", relief="flat", padx=4, pady=0, cursor="hand2", command=self.atualizar_fila_pedidos_async)
+        self.btn_atualizar_fila = tk.Button(status_frame, text="🔄 Atualizar", font=("Segoe UI", 7, "bold"), bg="#E0F2FE", fg="#0369A1", activebackground="#BAE6FD", relief="flat", padx=4, pady=0, cursor="hand2", command=lambda: self.atualizar_fila_pedidos_async(dar_f5=False))
         self.btn_atualizar_fila.pack(side="right")
+        self.btn_atualizar_fila.bind("<Button-3>", lambda e: self.atualizar_fila_pedidos_async(dar_f5=True))
+
+        self.btn_pag2 = tk.Button(status_frame, text="📄 Pág 2", font=("Segoe UI", 7, "bold"), bg="#FEF3C7", fg="#92400E", activebackground="#FDE68A", relief="flat", padx=3, pady=0, cursor="hand2", command=self.carregar_pagina_2_async)
+        self.btn_pag2.pack(side="right", padx=(0, 2))
 
         self.entry_pedido = tk.Entry(body, font=("Segoe UI", 12, "bold"), justify="center", bg="#FFFFFF", fg="#0F172A", relief="solid", bd=1)
         self.entry_pedido.pack(fill=tk.X, pady=(1, 1), ipady=2)
@@ -747,12 +865,15 @@ class AutomacaoPedidosApp:
     def trocar_portal_weg(self, novo_local):
         """Fecha o portal WEG atual e loga no portal escolhido, mantendo o LF."""
         try:
+            self.pedidos_nao_lidos = []
             if hasattr(self, 'btn_proximo'):
-                self.btn_proximo.config(state=tk.DISABLED)
+                self.btn_proximo.config(state=tk.DISABLED, text="Conectando...")
             if hasattr(self, 'btn_digitado'):
                 self.btn_digitado.config(state=tk.DISABLED)
             self.btn_recomecar.config(state=tk.DISABLED)
             self.btn_trocar.config(state=tk.DISABLED, text="Trocando de portal...")
+            if hasattr(self, 'lbl_fila_pedidos'):
+                self.lbl_fila_pedidos.config(text=f"⏳ Conectando ao portal {novo_local}...", fg="#0284C7")
             self.root.update()
 
             # Fecha o navegador da WEG atual
@@ -803,10 +924,19 @@ class AutomacaoPedidosApp:
             self.robust_find_and_send_keys(self.driver_weg, By.XPATH, XPATHS_WEG["login_pass"], creds_weg["pass"])
             self.robust_click(self.driver_weg, By.XPATH, XPATHS_WEG["login_btn"])
             
-            time.sleep(2)
+            # Aguarda a tabela de transações do novo portal carregar completamente
+            try:
+                WebDriverWait(self.driver_weg, 20).until(
+                    EC.presence_of_element_located((By.XPATH, "//table//tbody/tr"))
+                )
+            except Exception:
+                time.sleep(2.5)
+            
             self.organizar_janelas_lado_a_lado()
             self.criar_painel_controle() # Atualiza os textos do painel
-            self.info_topmost("Sucesso", f"Portal trocado para WEG {self.local_weg_escolhido} com sucesso!")
+            
+            # Dispara busca de pedidos não lidos do novo portal automaticamente
+            self.atualizar_fila_pedidos_async(dar_f5=False)
 
         except Exception as e:
             self.error_topmost("Erro", f"Ocorreu um erro ao trocar o portal: {e}")
@@ -905,6 +1035,7 @@ class AutomacaoPedidosApp:
             df.dropna(how='all', inplace=True)
 
             col_w = self.config.get("col_codigo_weg", "B")
+            col_desc = self.config.get("col_desc", "C")
             col_l = self.config.get("col_codigo_lf", "D")
             col_tipo = self.config.get("col_tipo", "E")
             col_p_pro = self.config.get("col_preco_pro_emprego", "I")
@@ -926,6 +1057,7 @@ class AutomacaoPedidosApp:
                 return None
 
             idx_w = get_col_index(col_w)
+            idx_desc = get_col_index(col_desc)
             idx_l = get_col_index(col_l)
             idx_tipo = get_col_index(col_tipo)
             idx_p_pro = get_col_index(col_p_pro)
@@ -951,6 +1083,7 @@ class AutomacaoPedidosApp:
                 try:
                     cod_w = str(row[idx_w]).strip() if idx_w is not None and idx_w < len(row) else ""
                     cod_l = str(row[idx_l]).strip() if idx_l is not None and idx_l < len(row) else ""
+                    desc_val = str(row[idx_desc]).strip() if idx_desc is not None and idx_desc < len(row) else ""
                     tipo_str = str(row[idx_tipo]).strip().lower() if idx_tipo is not None and idx_tipo < len(row) else ""
                     
                     if not cod_w or cod_w.lower() == 'nan' or cod_w == str(first_row[idx_w] if idx_w is not None else ""):
@@ -958,6 +1091,11 @@ class AutomacaoPedidosApp:
                     if cod_w.endswith('.0'): cod_w = cod_w[:-2]
                     if cod_l.endswith('.0'): cod_l = cod_l[:-2]
                     if cod_w == '0' or cod_w == 'nan': continue
+
+                    if cod_l and desc_val and desc_val.lower() != 'nan':
+                        cod_lf_norm = self.normalizar_codigo(cod_l)
+                        if cod_lf_norm and cod_lf_norm not in self.mapa_descricoes_lf:
+                            self.mapa_descricoes_lf[cod_lf_norm] = encurtar_descricao(desc_val, 60)
                     
                     p_pro = limpar_preco(row[idx_p_pro] if idx_p_pro is not None and idx_p_pro < len(row) else None)
                     p_ind12 = limpar_preco(row[idx_p_ind12] if idx_p_ind12 is not None and idx_p_ind12 < len(row) else None)
@@ -1004,6 +1142,23 @@ class AutomacaoPedidosApp:
                 except Exception:
                     continue
                     
+            # Mescla descrições conhecidas do histórico de RFQ no mapa de SKU
+            try:
+                if historico_rfq:
+                    hist_data = historico_rfq.carregar_historico()
+                    for reg in hist_data.values():
+                        for it in reg.get("itens", []):
+                            clf = str(it.get("codigo_lf") or "").strip()
+                            if clf.endswith('.0'): clf = clf[:-2]
+                            if clf and clf != '0':
+                                cnorm = self.normalizar_codigo(clf)
+                                d = it.get("descricao_lf") or it.get("texto_rfq") or ""
+                                d_limpa = encurtar_descricao(d, 60)
+                                if d_limpa and cnorm not in self.mapa_descricoes_lf:
+                                    self.mapa_descricoes_lf[cnorm] = d_limpa
+            except Exception:
+                pass
+
             if not silencioso:
                 self.info_topmost("Sucesso", f"Tabela de preços carregada ({len(self.tabela_precos)} itens mapeados).")
         except Exception as e:
@@ -1076,35 +1231,18 @@ class AutomacaoPedidosApp:
 
 
     def show_rfq_popup(self, rfq_number):
-        def _show():
-            self.force_top_window()
-            top = tk.Toplevel(self.root)
-            top.title("RFQ Encontrada")
-            top.attributes('-topmost', True)
-            
-            ws = self.screen_width
-            hs = self.screen_height
-            w, h = 250, 120
-            x = int((ws/2) - (w/2))
-            y = int((hs/2) - (h/2))
-            top.geometry('%dx%d+%d+%d' % (w, h, x, y))
-            
-            tk.Label(top, text=f"RFQ Encontrada:\n{rfq_number}", font=("Arial", 11, "bold")).pack(pady=10)
-            
-            def copy_and_close():
-                import subprocess
-                try:
-                    subprocess.run("clip", text=True, input=str(rfq_number).strip(), check=True)
-                except Exception as e:
-                    print("Erro no clip:", e)
-                    self.root.clipboard_clear()
-                    self.root.clipboard_append(rfq_number)
-                    self.root.update()
-                top.destroy()
-                
-            tk.Button(top, text="COPIAR", bg="green", fg="white", font=("Arial", 10, "bold"), command=copy_and_close).pack(pady=5, fill=tk.X, padx=20)
-            self.root.wait_window(top)
-        self._run_on_ui(_show)
+        """Copia a RFQ para o clipboard sem bloquear a execução com modal desnecessário."""
+        try:
+            import subprocess
+            subprocess.run("clip", text=True, input=str(rfq_number).strip(), check=False)
+        except Exception:
+            try:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(str(rfq_number).strip())
+            except Exception:
+                pass
+        print(f"  > RFQ {rfq_number} copiada para a área de transferência.")
+        return
 
     def mostrar_aviso_desconto_35(self, mensagem):
         def _show_aviso():
@@ -1679,6 +1817,17 @@ class AutomacaoPedidosApp:
             print(f"  > RFQ {rfq} não está no histórico (não foi respondida pelo robô de RFQ).")
             return
 
+        # Guarda no mapa da aplicação as descrições dos SKUs presentes nesta RFQ
+        for reg_it in registro.get("itens", []):
+            clf = str(reg_it.get("codigo_lf") or "").strip()
+            if clf.endswith('.0'): clf = clf[:-2]
+            if clf and clf != '0':
+                cnorm = self.normalizar_codigo(clf)
+                d = reg_it.get("descricao_lf") or reg_it.get("texto_rfq") or ""
+                d_limpa = encurtar_descricao(d, 60)
+                if d_limpa:
+                    self.mapa_descricoes_lf[cnorm] = d_limpa
+
         itens_alvo = [it for it in dados_pedido.get("itens", []) if not it.get("codigo_lf")]
         if not itens_alvo:
             return
@@ -1704,13 +1853,13 @@ class AutomacaoPedidosApp:
                     print(f"    ⚠️ Observação de lote na RFQ para este item: {esc['nota_lote']}")
             elif res["candidatos"]:
                 sugestoes = []
-                for c in res["candidatos"][:5]:
+                for c in res["candidatos"][:3]:
                     ci = c["item"]
                     desc = ci.get("descricao_lf") or ci.get("texto_rfq") or ""
                     sugestoes.append({
                         "codigo_lf": ci.get("codigo_lf"),
                         "preco": ci.get("preco", ""),
-                        "descricao": re.sub(r'\s+', ' ', str(desc))[:90],
+                        "descricao": encurtar_descricao(desc, 50),
                         "item_rfq": ci.get("item_rfq"),
                         "preco_ok": c["preco_ok"],
                         "codigo_ok": c["codigo_ok"],
@@ -1733,41 +1882,68 @@ class AutomacaoPedidosApp:
         self.root.after(0, _upd)
 
     def abrir_janela_codigos_pendentes(self, itens_sem_codigo):
-        """Abre uma janela moderna e prática listando todos os itens sem código LF para o usuário colar."""
+        """Abre uma janela moderna, limpa e prática listando os itens que precisam de conferência de SKU."""
         if not itens_sem_codigo:
             self.codigos_preenchidos_event.set()
             return
 
         top = tk.Toplevel(self.root)
         self.janela_codigos_pendentes = top
-        top.title(f"⚡ Códigos LF Faltantes - Pedido {self.numero_pedido_atual}")
-        top.geometry("740x520")
-        top.minsize(640, 380)
+        top.title(f"⚡ Conferência de Códigos LF - Pedido {self.numero_pedido_atual}")
+        top.geometry("760x520")
+        top.minsize(680, 380)
         top.configure(bg="#F8FAFC")
         top.attributes('-topmost', True)
         
         # Centralizar na tela
         ws = self.screen_width
         hs = self.screen_height
-        w, h = 740, 520
+        w, h = 760, 520
         if any(it.get("sugestoes_rfq") for it in itens_sem_codigo):
-            w, h = 820, min(720, max(520, hs - 120))
+            w, h = 820, min(680, max(500, hs - 120))
         x = max(0, int((ws - w) / 2))
         y = max(0, int((hs - h) / 2))
         top.geometry(f"{w}x{h}+{x}+{y}")
 
-        # Cabeçalho
-        header = tk.Frame(top, bg="#1E293B", padx=16, pady=12)
+        # Cabeçalho com botão discreto para copiar a RFQ
+        header = tk.Frame(top, bg="#1E293B", padx=16, pady=10)
         header.pack(fill=tk.X)
         
-        tk.Label(header, text=f"📋 Códigos LF Pendentes — Pedido {self.numero_pedido_atual}", 
-                 font=("Segoe UI", 12, "bold"), fg="#FFFFFF", bg="#1E293B").pack(anchor="w")
-        tk.Label(header, text=f"Foram identificados {len(itens_sem_codigo)} itens sem código LF correspondente.\n"
-                              "Cole os códigos abaixo enquanto o robô prepara o pedido no LF. Ao terminar, clique em Salvar.", 
-                 font=("Segoe UI", 9), fg="#94A3B8", bg="#1E293B", justify="left").pack(anchor="w", pady=(3, 0))
+        header_top_row = tk.Frame(header, bg="#1E293B")
+        header_top_row.pack(fill=tk.X)
+        
+        tk.Label(header_top_row, text=f"📋 Códigos LF Pendentes — Pedido {self.numero_pedido_atual}", 
+                 font=("Segoe UI", 11, "bold"), fg="#FFFFFF", bg="#1E293B").pack(side=tk.LEFT)
+
+        # Procura se há RFQ associada para colocar o botão discreto de copiar
+        rfq_num = str(self.dados_pedido_atual.get("rfq") or "").strip()
+        if not rfq_num:
+            for it in itens_sem_codigo:
+                if it.get("rfq_historico"):
+                    rfq_num = str(it.get("rfq_historico")).strip()
+                    break
+
+        if rfq_num:
+            def copiar_rfq_header():
+                try:
+                    import subprocess
+                    subprocess.run("clip", text=True, input=rfq_num, check=False)
+                except Exception:
+                    self.root.clipboard_clear()
+                    self.root.clipboard_append(rfq_num)
+                btn_rfq_header.config(text=f"✅ Copiado! ({rfq_num})", bg="#15803D")
+                top.after(1800, lambda: btn_rfq_header.config(text=f"📋 Copiar RFQ: {rfq_num}", bg="#334155"))
+
+            btn_rfq_header = tk.Button(header_top_row, text=f"📋 Copiar RFQ: {rfq_num}", font=("Segoe UI", 8, "bold"), 
+                                       bg="#334155", fg="white", activebackground="#475569", activeforeground="white", 
+                                       relief="flat", padx=8, pady=2, cursor="hand2", command=copiar_rfq_header)
+            btn_rfq_header.pack(side=tk.RIGHT)
+
+        tk.Label(header, text="Confira a descrição e selecione o código LF correto enquanto o robô prepara o cabeçalho.", 
+                 font=("Segoe UI", 8), fg="#94A3B8", bg="#1E293B", justify="left").pack(anchor="w", pady=(2, 0))
 
         # Container para a lista com Scrollbar
-        container = tk.Frame(top, bg="#F8FAFC", padx=12, pady=8)
+        container = tk.Frame(top, bg="#F8FAFC", padx=12, pady=6)
         container.pack(fill=tk.BOTH, expand=True)
 
         canvas = tk.Canvas(container, bg="#F8FAFC", highlightthickness=0)
@@ -1798,7 +1974,7 @@ class AutomacaoPedidosApp:
 
         for idx, item in enumerate(itens_sem_codigo):
             card = tk.Frame(scrollable_frame, bg="#FFFFFF", highlightbackground="#CBD5E1", 
-                            highlightthickness=1, padx=12, pady=10)
+                            highlightthickness=1, padx=12, pady=8)
             card.pack(fill=tk.X, pady=4, padx=2)
 
             info_frame = tk.Frame(card, bg="#FFFFFF")
@@ -1809,69 +1985,114 @@ class AutomacaoPedidosApp:
             preco_str = item.get('preco', '0,00')
             qtd_str = item.get('qtd', '0')
             desc_str = item.get('descricao', f'Item {idx + 1}')
+            desc_ped_curta = encurtar_descricao(desc_str, 55)
 
+            # Linha superior enxuta
             row_top = tk.Frame(info_frame, bg="#FFFFFF")
             row_top.pack(fill=tk.X)
 
-            tk.Label(row_top, text=f"Item {idx + 1} (OC: {num_weg})", font=("Segoe UI", 10, "bold"), 
+            tk.Label(row_top, text=f"Item {idx + 1} (OC {num_weg})", font=("Segoe UI", 9, "bold"), 
                      fg="#0F172A", bg="#FFFFFF").pack(side=tk.LEFT)
             
             if cod_prod:
-                tk.Label(row_top, text=f"  •  Cód WEG: {cod_prod}", font=("Segoe UI", 9, "bold"), 
+                tk.Label(row_top, text=f"  •  Cód WEG: {cod_prod}", font=("Segoe UI", 8), 
                          fg="#2563EB", bg="#FFFFFF").pack(side=tk.LEFT)
             
             tk.Label(row_top, text=f"  •  Preço: R$ {preco_str}", font=("Segoe UI", 9, "bold"), 
                      fg="#16A34A", bg="#FFFFFF").pack(side=tk.LEFT)
-            tk.Label(row_top, text=f"  •  Qtd: {qtd_str}", font=("Segoe UI", 9), 
+            tk.Label(row_top, text=f"  •  Qtd: {qtd_str}", font=("Segoe UI", 8), 
                      fg="#64748B", bg="#FFFFFF").pack(side=tk.LEFT)
 
-            tk.Label(info_frame, text=desc_str, font=("Segoe UI", 9), 
-                     fg="#475569", bg="#FFFFFF", wraplength=450, justify="left").pack(anchor="w", pady=(3, 0))
+            # Descrição do Pedido (curta e sem poluição)
+            row_desc = tk.Frame(info_frame, bg="#FFFFFF")
+            row_desc.pack(fill=tk.X, pady=(2, 0))
+            tk.Label(row_desc, text="📋 Pedido:", font=("Segoe UI", 8, "bold"), fg="#475569", bg="#FFFFFF").pack(side=tk.LEFT)
+            tk.Label(row_desc, text=f" {desc_ped_curta}", font=("Segoe UI", 8), fg="#0F172A", bg="#FFFFFF").pack(side=tk.LEFT)
 
-            # Lado direito: campo para colar o código LF
+            # Lado direito: campo para colar o código LF + preview da descrição do SKU
             entry_frame = tk.Frame(card, bg="#FFFFFF")
             entry_frame.pack(side=tk.RIGHT, padx=(10, 0))
 
             tk.Label(entry_frame, text="Código LF (SKU):", font=("Segoe UI", 8, "bold"), 
-                     fg="#334155", bg="#FFFFFF").pack(anchor="w")
+                     fg="#334155", bg="#FFFFFF").pack(anchor="center")
             
-            ent = tk.Entry(entry_frame, font=("Segoe UI", 11, "bold"), width=14, 
+            ent = tk.Entry(entry_frame, font=("Segoe UI", 11, "bold"), width=12, 
                            justify="center", bg="#F8FAFC", fg="#0F172A", relief="solid", bd=1)
-            ent.pack(ipady=3)
+            ent.pack(ipady=2)
+
+            lbl_desc_sku = tk.Label(entry_frame, text="", font=("Segoe UI", 7, "italic"), 
+                                    fg="#0369A1", bg="#FFFFFF", wraplength=160, justify="center")
+            lbl_desc_sku.pack(anchor="center", pady=(1, 0))
+
             entries_map.append((item, ent))
 
-            # --- Sugestões vindas do histórico de RFQs (itens em dúvida) ---
+            # Atualizador dinâmico da descrição do SKU ao digitar ou clicar
+            def _criar_atualizador(entry_widget, label_widget, item_ref):
+                def _atualizar(*_):
+                    val = entry_widget.get().strip()
+                    if '/' in val: val = val.split('/')[0].strip()
+                    if val.isdigit() and len(val) < 6: val = val.zfill(6)
+                    norm = self.normalizar_codigo(val)
+                    desc = self.mapa_descricoes_lf.get(norm, "")
+                    if not desc and item_ref.get("sugestoes_rfq"):
+                        for s in item_ref["sugestoes_rfq"]:
+                            if self.normalizar_codigo(s.get("codigo_lf")) == norm:
+                                desc = s.get("descricao", "")
+                                break
+                    if desc:
+                        label_widget.config(text=f"📦 {encurtar_descricao(desc, 32)}", fg="#0369A1")
+                    elif val:
+                        label_widget.config(text=f"SKU {val}", fg="#94A3B8")
+                    else:
+                        label_widget.config(text="")
+                return _atualizar
+
+            atualizador_sku = _criar_atualizador(ent, lbl_desc_sku, item)
+            ent.bind("<KeyRelease>", atualizador_sku)
+            ent.bind("<FocusOut>", atualizador_sku)
+
+            # --- Sugestões vindas do histórico de RFQs ---
             sugestoes = item.get("sugestoes_rfq") or []
             if sugestoes:
-                card.config(highlightbackground="#F59E0B", highlightthickness=2)
+                card.config(highlightbackground="#F59E0B", highlightthickness=1)
                 if item.get("sugestao_rfq"):
                     ent.insert(0, item["sugestao_rfq"])
                     ent.config(bg="#FEF3C7")
 
-                sug_frame = tk.Frame(info_frame, bg="#FFFBEB", highlightbackground="#FCD34D", highlightthickness=1, padx=8, pady=5)
-                sug_frame.pack(fill=tk.X, pady=(6, 0))
-                tk.Label(sug_frame, text=f"⚠️ CONFIRME — RFQ {item.get('rfq_historico', '')}: não tenho certeza. Clique na opção correta (ou digite outro código):",
-                         font=("Segoe UI", 8, "bold"), fg="#92400E", bg="#FFFBEB", wraplength=430, justify="left").pack(anchor="w")
+                sug_frame = tk.Frame(info_frame, bg="#FFFBEB", highlightbackground="#FDE68A", highlightthickness=1, padx=6, pady=4)
+                sug_frame.pack(fill=tk.X, pady=(3, 0))
 
-                def make_pick(e=ent, cod=None):
+                bateu_preco = any(s.get("preco_ok") for s in sugestoes)
+                if bateu_preco:
+                    txt_aviso = "🟢 Preço bateu com a RFQ — clique para usar ou digite o código:"
+                else:
+                    txt_aviso = "🟡 Opções sugeridas da RFQ — clique para usar:"
+
+                tk.Label(sug_frame, text=txt_aviso, font=("Segoe UI", 7, "bold"), fg="#92400E", bg="#FFFBEB").pack(anchor="w")
+
+                def make_pick(e=ent, cod=None, cb=atualizador_sku):
                     def _pick():
                         e.delete(0, tk.END)
                         e.insert(0, cod or "")
                         e.config(bg="#DCFCE7")
+                        if cb: cb()
                     return _pick
 
-                for s in sugestoes:
-                    marcas = []
-                    if s.get("codigo_ok"): marcas.append("✔ cód. WEG")
-                    if s.get("preco_ok"): marcas.append("✔ preço")
-                    marcas.append(f"desc {int(round(s.get('similaridade', 0) * 100))}%")
-                    txt_btn = f"{s.get('codigo_lf')}  •  R$ {s.get('preco', '')}  •  {s.get('descricao', '')}  [{' | '.join(marcas)}]"
-                    if s.get("nota_lote"):
-                        txt_btn += f"  ⚠️ {s['nota_lote']}"
-                    tk.Button(sug_frame, text=txt_btn, command=make_pick(ent, s.get("codigo_lf")),
-                              font=("Segoe UI", 8), bg="#FFFFFF", fg="#0F172A", activebackground="#FEF3C7",
-                              relief="solid", bd=1, anchor="w", justify="left", wraplength=430, cursor="hand2"
+                for s in sugestoes[:3]:
+                    cod_s = s.get('codigo_lf', '')
+                    pr_s = s.get('preco', '')
+                    desc_s = encurtar_descricao(s.get('descricao', ''), 40)
+                    tag_preco = " [✔ Preço]" if s.get("preco_ok") else ""
+                    txt_btn = f"👉 SKU {cod_s}  •  R$ {pr_s}  •  {desc_s}{tag_preco}"
+                    
+                    bg_btn = "#DCFCE7" if s.get("preco_ok") else "#FFFFFF"
+                    tk.Button(sug_frame, text=txt_btn, command=make_pick(ent, cod_s, atualizador_sku),
+                              font=("Segoe UI", 8), bg=bg_btn, fg="#0F172A", activebackground="#FEF3C7",
+                              relief="solid", bd=1, anchor="w", justify="left", cursor="hand2"
                               ).pack(fill=tk.X, pady=1)
+
+            # Dispara atualização inicial se o SKU já estava preenchido
+            atualizador_sku()
 
         # Navegação com Enter e setas
         def make_enter_handler(i):
@@ -2030,7 +2251,7 @@ class AutomacaoPedidosApp:
             except Exception:
                 pass
             
-            self.driver_weg.get(URL_PORTAL_WEG_JVE)
+            self.driver_weg.get(url_weg)
             self.robust_find_and_send_keys(self.driver_weg, By.XPATH, XPATHS_WEG["login_user"], creds_weg["user"])
             time.sleep(0.3)
             self.robust_find_and_send_keys(self.driver_weg, By.XPATH, XPATHS_WEG["login_pass"], creds_weg["pass"])
@@ -2038,16 +2259,22 @@ class AutomacaoPedidosApp:
             self.robust_click(self.driver_weg, By.XPATH, XPATHS_WEG["login_btn"])
             print("Login WEG OK.")
             
-            time.sleep(0.8) 
-            self.organizar_janelas_lado_a_lado()
+            # Aguarda a tabela de transações do Mercado Eletrônico carregar completamente
+            try:
+                WebDriverWait(self.driver_weg, 20).until(
+                    EC.presence_of_element_located((By.XPATH, "//table//tbody/tr"))
+                )
+            except Exception:
+                time.sleep(2.5)
             
-            # Substitui o popup inicial pelo painel de controle
+            self.organizar_janelas_lado_a_lado()
             self.criar_painel_controle()
             
-            # Dispara leitura automática dos pedidos não lidos da WEG em segundo plano
-            threading.Thread(target=lambda: self.atualizar_fila_pedidos(dar_f5=False), daemon=True).start()
+            # Dispara leitura automática dos pedidos não lidos da WEG
+            self.atualizar_fila_pedidos_async(dar_f5=False)
             
-            self.info_topmost("Pronto", "Logins efetuados. Digite o número do pedido no painel para começar.")
+            # Inicia o monitoramento ocioso inteligente para auto-localizar novos pedidos
+            self.root.after(4000, self._iniciar_monitoramento_ocioso)
             
         except Exception as e:
             self.error_topmost("Erro no Login", f"Não foi possível fazer login.\nErro: {e}")
@@ -2057,6 +2284,18 @@ class AutomacaoPedidosApp:
     def processar_proximo_fila(self):
         """Processa diretamente o próximo pedido sugerido da fila (o mais antigo)."""
         pedidos = getattr(self, 'pedidos_nao_lidos', [])
+        if not pedidos:
+            # Tenta varredura dinâmica na tela atual antes de emitir aviso
+            try:
+                res = self.extrair_pedidos_nao_lidos_portal()
+                novos = res.get("pedidos", [])
+                if novos:
+                    self.pedidos_nao_lidos = novos
+                    self._sincronizar_ui_fila_pedidos()
+                    pedidos = self.pedidos_nao_lidos
+            except Exception:
+                pass
+
         if not pedidos:
             self.warning_topmost("Fila Vazia", "Não há pedidos pendentes na fila.")
             return
@@ -2083,6 +2322,7 @@ class AutomacaoPedidosApp:
         numero = str(numero).strip()
         if not numero: return
         
+        self.em_execucao = True
         self.numero_pedido_atual = numero
         self.itens_desconto_35 = []
         self.itens_preco_maior = []
@@ -2103,12 +2343,15 @@ class AutomacaoPedidosApp:
             self.btn_trocar.config(state=tk.DISABLED)
         if hasattr(self, 'btn_atualizar_fila'):
             self.btn_atualizar_fila.config(state=tk.DISABLED)
+        if hasattr(self, 'btn_pag2'):
+            self.btn_pag2.config(state=tk.DISABLED)
         self.entry_pedido.config(state=tk.DISABLED)
         
         t = threading.Thread(target=self._executar_processo_pedido, daemon=True)
         t.start()
 
     def _restaurar_painel(self):
+        self.em_execucao = False
         if hasattr(self, 'btn_proximo'):
             self.btn_proximo.config(state=tk.NORMAL)
         if hasattr(self, 'btn_digitado'):
@@ -2119,6 +2362,8 @@ class AutomacaoPedidosApp:
             self.btn_trocar.config(state=tk.NORMAL)
         if hasattr(self, 'btn_atualizar_fila'):
             self.btn_atualizar_fila.config(state=tk.NORMAL)
+        if hasattr(self, 'btn_pag2'):
+            self.btn_pag2.config(state=tk.NORMAL)
         self.entry_pedido.config(state=tk.NORMAL)
         
         # Sincroniza a interface com a fila atualizada de pedidos
@@ -2164,7 +2409,16 @@ class AutomacaoPedidosApp:
                 print(dados_pedido_completo["aviso_extracao"])
                 
             if dados_pedido_completo.get("rfq"):
-                self.show_rfq_popup(dados_pedido_completo["rfq"])
+                rfq_num = str(dados_pedido_completo["rfq"]).strip()
+                print(f"  > RFQ encontrada no pedido: {rfq_num}")
+                try:
+                    subprocess.run("clip", text=True, input=rfq_num, check=False)
+                except Exception:
+                    try:
+                        self.root.clipboard_clear()
+                        self.root.clipboard_append(rfq_num)
+                    except Exception:
+                        pass
                 self.aplicar_historico_rfq(dados_pedido_completo)
             
             print("Dados encontrados. Verificando aplicações...")
