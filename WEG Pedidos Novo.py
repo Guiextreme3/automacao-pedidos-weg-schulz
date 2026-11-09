@@ -455,7 +455,7 @@ class AutomacaoPedidosApp:
         y = (hs/2) - (h/2)
         self.root.geometry('%dx%d+%d+%d' % (w, h, x, y))
 
-    def posicionar_painel_embaixo(self, w=270, h=270):
+    def posicionar_painel_embaixo(self, w=330, h=310):
         """Posiciona a janela de controle centralizada na horizontal, mas bem embaixo na tela,
         rente acima da barra de tarefas, liberando a visão das duas telas do navegador no fundo."""
         ws = self.root.winfo_screenwidth()
@@ -463,6 +463,22 @@ class AutomacaoPedidosApp:
         x = int((ws - w) / 2)
         y = max(10, int(hs - h - 65))
         self.root.geometry(f'{w}x{h}+{x}+{y}')
+
+    def _sanitizar_lista_pedidos(self, lista):
+        """Filtra rigorosamente uma lista para conter apenas números de pedido WEG válidos (10 dígitos começando com 45),
+        eliminando chaves de dicionário ('pedidos', 'pagina'), textos aleatórios e duplicatas."""
+        if not lista:
+            return []
+        if isinstance(lista, dict):
+            lista = lista.get("pedidos", [])
+        validos = []
+        for item in lista:
+            s = str(item).strip()
+            # Valida estritamente número de pedido WEG (45 seguido de 8 dígitos)
+            if re.fullmatch(r"45\d{8}", s):
+                if s not in validos:
+                    validos.append(s)
+        return validos
 
     def criar_tela_inicial(self):
         for widget in self.root.winfo_children():
@@ -510,21 +526,42 @@ class AutomacaoPedidosApp:
             var unreadList = [];
             var rows = document.querySelectorAll("table tbody tr");
             
-            // Detecta a página ativa na paginação (BootstrapVue ou genérica)
+            // Detecta a página ativa na paginação (Mercado Eletrônico ou BootstrapVue)
             var pageNum = 1;
             var totalPages = 1;
-            var activeEl = document.querySelector(".pagination .page-item.active, .pagination .active, [aria-current='page'], .b-pagination .active");
-            if (activeEl) {
-                var pTxt = (activeEl.innerText || "").replace(/\\D/g, "");
-                if (pTxt) pageNum = parseInt(pTxt, 10);
+            
+            // 1. Padrão ME: "< 11 - 20 de 370 >"
+            var pagRegex = /(\\d+)\\s*-\\s*(\\d+)\\s+de\\s+(\\d+)/i;
+            var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+            var tNode;
+            while (tNode = walker.nextNode()) {
+                var match = (tNode.nodeValue || "").match(pagRegex);
+                if (match) {
+                    var startItem = parseInt(match[1], 10);
+                    var endItem = parseInt(match[2], 10);
+                    var totalItems = parseInt(match[3], 10);
+                    var perPage = (endItem - startItem + 1) || 10;
+                    pageNum = Math.floor((startItem - 1) / perPage) + 1;
+                    totalPages = Math.ceil(totalItems / perPage);
+                    break;
+                }
             }
-            var pageLinks = document.querySelectorAll(".pagination .page-link, .pagination .page-item, .b-pagination .page-item");
-            pageLinks.forEach(function(el) {
-                var num = parseInt((el.innerText || "").replace(/\\D/g, ""), 10);
-                if (!isNaN(num) && num > totalPages) totalPages = num;
-            });
 
-            // Varre de baixo para cima (do mais antigo para o mais novo na página atual)
+            // 2. Fallback para paginação tradicional
+            if (pageNum === 1 && totalPages === 1) {
+                var activeEl = document.querySelector(".pagination .page-item.active, .pagination .active, [aria-current='page'], .b-pagination .active");
+                if (activeEl) {
+                    var pTxt = (activeEl.innerText || "").replace(/\\D/g, "");
+                    if (pTxt) pageNum = parseInt(pTxt, 10);
+                }
+                var pageLinks = document.querySelectorAll(".pagination .page-link, .pagination .page-item, .b-pagination .page-item");
+                pageLinks.forEach(function(el) {
+                    var num = parseInt((el.innerText || "").replace(/\\D/g, ""), 10);
+                    if (!isNaN(num) && num > totalPages) totalPages = num;
+                });
+            }
+
+            // Varre de baixo para cima (do último da lista pro primeiro na página atual)
             for (var i = rows.length - 1; i >= 0; i--) {
                 var row = rows[i];
                 var text = (row.innerText || "").toLowerCase();
@@ -557,7 +594,7 @@ class AutomacaoPedidosApp:
             """
             res = self.driver_weg.execute_script(js_code)
             if res and isinstance(res, dict):
-                p_list = [str(p).strip() for p in res.get("pedidos", []) if str(p).strip()]
+                p_list = self._sanitizar_lista_pedidos(res.get("pedidos", []))
                 resultado["pedidos"] = p_list
                 resultado["pagina"] = int(res.get("pagina", 1))
                 resultado["total_paginas"] = int(res.get("total_paginas", 1))
@@ -583,13 +620,14 @@ class AutomacaoPedidosApp:
                                 m = re.search(r'\b(45\d{8})\b', r.text)
                                 if m:
                                     foundNum = m.group(1)
-                            if foundNum and foundNum not in resultado["pedidos"]:
+                            if foundNum and re.fullmatch(r"45\d{8}", foundNum) and foundNum not in resultado["pedidos"]:
                                 resultado["pedidos"].append(foundNum)
                     except Exception:
                         pass
             except Exception:
                 pass
 
+        resultado["pedidos"] = self._sanitizar_lista_pedidos(resultado["pedidos"])
         return resultado
 
     def atualizar_fila_pedidos(self, dar_f5=False):
@@ -627,28 +665,23 @@ class AutomacaoPedidosApp:
                 time.sleep(0.4)
 
             dados_extracao = self.extrair_pedidos_nao_lidos_portal()
-            pedidos_lidos = dados_extracao.get("pedidos", [])
+            pedidos_lidos = self._sanitizar_lista_pedidos(dados_extracao.get("pedidos", []))
             pagina = dados_extracao.get("pagina", 1)
             self.total_paginas_weg = dados_extracao.get("total_paginas", 1)
             self.pagina_atual_weg = pagina
 
-            fila_atual = getattr(self, 'pedidos_nao_lidos', [])
-            # Se estiver na Página 2 (ou superior), os pedidos são MAIS ANTIGOS que os da página 1!
-            # Portanto, entram como PRIORIDADE no topo da fila de execução!
-            if pagina > 1:
-                # Mantém os pedidos lidos na frente (prioridade) e depois os anteriores
-                fila_final = pedidos_lidos + [p for p in fila_atual if p not in pedidos_lidos]
-                self.pedidos_nao_lidos = fila_final
-                print(f"Pedidos da Página {pagina} (mais antigos) adicionados com PRIORIDADE: {pedidos_lidos}")
-            else:
-                if dar_f5:
-                    self.pedidos_nao_lidos = pedidos_lidos
-                else:
-                    # Preserva pedidos prioritários da página 2 que já estejam na fila
-                    prioritarios_existentes = [p for p in fila_atual if p not in pedidos_lidos]
-                    self.pedidos_nao_lidos = prioritarios_existentes + pedidos_lidos
+            fila_atual = self._sanitizar_lista_pedidos(getattr(self, 'pedidos_nao_lidos', []))
+            
+            # Combina pedidos lidos da tela com os já existentes na fila sem duplicatas
+            combinados = pedidos_lidos + [p for p in fila_atual if p not in pedidos_lidos]
+            
+            # Ordena estritamente do menor para o maior (do mais antigo para o mais novo).
+            # Na WEG, números de pedido são sequenciais de 10 dígitos (45...).
+            # O menor número é SEMPRE o pedido mais antigo gerado, garantindo 100% que
+            # a execução seja do último da lista para o primeiro na tela!
+            self.pedidos_nao_lidos = sorted(combinados, key=lambda x: int(x))
 
-            print(f"Fila atualizada (Página {pagina} de {self.total_paginas_weg}): {self.pedidos_nao_lidos}")
+            print(f"Fila atualizada (Página {pagina} de {self.total_paginas_weg}) [Mais antigo primeiro]: {self.pedidos_nao_lidos}")
         except Exception as e:
             print(f"Aviso ao buscar pedidos não lidos: {e}")
         finally:
@@ -672,9 +705,32 @@ class AutomacaoPedidosApp:
             try:
                 self.driver_weg.switch_to.default_content()
                 js_click_pag2 = """
-                var links = document.querySelectorAll(".pagination .page-link, .pagination button, .pagination a");
+                // 1. Procura paginação no formato "< 1 - 10 de 370 >" e clica no botão '>'
+                var pagRegex = /(\\d+)\\s*-\\s*(\\d+)\\s+de\\s+(\\d+)/i;
+                var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+                var tNode;
+                while (tNode = walker.nextNode()) {
+                    var m = (tNode.nodeValue || "").match(pagRegex);
+                    if (m) {
+                        var parent = tNode.parentElement;
+                        var container = parent.closest("div") || parent.parentElement;
+                        if (container) {
+                            var btns = container.querySelectorAll("button, a, [role='button'], i, svg");
+                            if (btns.length >= 2) {
+                                var nextBtn = btns[btns.length - 1];
+                                if (!nextBtn.disabled && !nextBtn.classList.contains("disabled")) {
+                                    nextBtn.click();
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+                // 2. Fallback para botões tradicionais
+                var links = document.querySelectorAll(".pagination .page-link, .pagination button, .pagination a, [aria-label*='próxim' i], [aria-label*='next' i]");
                 for (var i = 0; i < links.length; i++) {
-                    if (links[i].innerText.trim() === "2") {
+                    var txt = (links[i].innerText || "").trim();
+                    if (txt === "2" || txt === ">" || txt === "»") {
                         links[i].click();
                         return true;
                     }
@@ -683,7 +739,7 @@ class AutomacaoPedidosApp:
                 """
                 clicou = self.driver_weg.execute_script(js_click_pag2)
                 if clicou:
-                    time.sleep(1.0) # Aguarda carregar dados da página 2 via Ajax
+                    time.sleep(1.2) # Aguarda carregar dados da página 2 via Ajax
                     self.atualizar_fila_pedidos(dar_f5=False)
                 else:
                     print("Botão da Página 2 não localizado diretamente. Atualizando tela atual...")
@@ -713,19 +769,30 @@ class AutomacaoPedidosApp:
 
     def _sincronizar_ui_fila_pedidos(self):
         """Atualiza a caixa de texto, rótulos e os botões da interface conforme a fila pendente."""
-        pedidos = getattr(self, 'pedidos_nao_lidos', [])
+        self.pedidos_nao_lidos = self._sanitizar_lista_pedidos(getattr(self, 'pedidos_nao_lidos', []))
+        pedidos = self.pedidos_nao_lidos
+        total = len(pedidos)
         pag_atual = getattr(self, 'pagina_atual_weg', 1)
+
+        # Atualiza o botão de ver fila
+        if hasattr(self, 'btn_ver_fila'):
+            self.btn_ver_fila.config(text=f"📋 Fila ({total})", state=tk.NORMAL)
+
+        # Atualiza a janela visual da fila se estiver aberta
+        if hasattr(self, 'janela_fila') and self.janela_fila and self.janela_fila.winfo_exists():
+            self._renderizar_itens_janela_fila()
+
         if pedidos:
             prox = pedidos[0]
             # Preenche na caixa o próximo sugerido da fila (o mais antigo)
-            self.entry_pedido.delete(0, tk.END)
-            self.entry_pedido.insert(0, prox)
-            self.entry_pedido.select_range(0, tk.END)
+            if hasattr(self, 'entry_pedido') and self.entry_pedido.cget("state") == tk.NORMAL:
+                self.entry_pedido.delete(0, tk.END)
+                self.entry_pedido.insert(0, prox)
+                self.entry_pedido.select_range(0, tk.END)
 
-            total = len(pedidos)
             if hasattr(self, 'lbl_fila_pedidos'):
                 if pag_atual > 1:
-                    self.lbl_fila_pedidos.config(text=f"📬 Não lidos: 1 de {total} (Pág. {pag_atual} - Prioridade)", fg="#B45309")
+                    self.lbl_fila_pedidos.config(text=f"📬 Não lidos: 1 de {total} (Pág. {pag_atual})", fg="#B45309")
                 else:
                     self.lbl_fila_pedidos.config(text=f"📬 Não lidos: 1 de {total} (mais antigo)", fg="#0369A1")
             if hasattr(self, 'btn_proximo'):
@@ -735,12 +802,13 @@ class AutomacaoPedidosApp:
 
             if hasattr(self, 'lbl_seq_pedidos'):
                 if total > 1:
-                    seq_str = ", ".join(pedidos[:3]) + ("..." if total > 3 else "")
-                    self.lbl_seq_pedidos.config(text=f"Fila: {seq_str}", fg="#64748B")
+                    seq_str = " ➔ ".join(pedidos[:3]) + (" ➔ ..." if total > 3 else "")
+                    self.lbl_seq_pedidos.config(text=f"Fila: {seq_str}", fg="#475569")
                 else:
-                    self.lbl_seq_pedidos.config(text=f"Fila: {prox} (último não lido)", fg="#64748B")
+                    self.lbl_seq_pedidos.config(text=f"Fila: {prox} (único não lido)", fg="#475569")
         else:
-            self.entry_pedido.delete(0, tk.END)
+            if hasattr(self, 'entry_pedido') and self.entry_pedido.cget("state") == tk.NORMAL:
+                self.entry_pedido.delete(0, tk.END)
             if hasattr(self, 'lbl_fila_pedidos'):
                 self.lbl_fila_pedidos.config(text="📋 Nº do Pedido WEG:", fg="#1E293B")
             if hasattr(self, 'btn_proximo'):
@@ -750,11 +818,147 @@ class AutomacaoPedidosApp:
             if hasattr(self, 'lbl_seq_pedidos'):
                 self.lbl_seq_pedidos.config(text="✅ Nenhum pedido 'Não lido'", fg="#166534")
 
+    # --- VISUALIZADOR DA FILA COMPLETA DE PEDIDOS ---
+    def abrir_janela_fila_pedidos(self):
+        """Abre uma janela visual com a lista completa de pedidos na fila, permitindo visualizar,
+        executar um pedido específico, remover da fila ou atualizar a partir do portal."""
+        if hasattr(self, 'janela_fila') and self.janela_fila and self.janela_fila.winfo_exists():
+            self.janela_fila.lift()
+            self.janela_fila.focus_force()
+            self._renderizar_itens_janela_fila()
+            return
+
+        self.janela_fila = tk.Toplevel(self.root)
+        self.janela_fila.title("📋 Fila de Pedidos WEG")
+        self.janela_fila.configure(bg="#F8FAFC")
+        self.janela_fila.attributes("-topmost", True)
+        
+        w, h = 390, 430
+        ws = self.janela_fila.winfo_screenwidth()
+        hs = self.janela_fila.winfo_screenheight()
+        x = max(10, int((ws - w) / 2))
+        y = max(10, int((hs - h) / 2) - 50)
+        self.janela_fila.geometry(f"{w}x{h}+{x}+{y}")
+        self.janela_fila.resizable(True, True)
+
+        # Header
+        header = tk.Frame(self.janela_fila, bg="#FFFFFF", highlightbackground="#CBD5E1", highlightthickness=1, padx=12, pady=8)
+        header.pack(fill=tk.X, padx=8, pady=(8, 4))
+        
+        tk.Label(header, text="📋 Fila de Pedidos Pendentes", font=("Segoe UI", 11, "bold"), fg="#0F172A", bg="#FFFFFF").pack(anchor="w")
+        self.lbl_janela_fila_sub = tk.Label(header, text="Carregando pedidos...", font=("Segoe UI", 8), fg="#64748B", bg="#FFFFFF")
+        self.lbl_janela_fila_sub.pack(anchor="w", pady=(2, 0))
+
+        # Container rolável com Canvas e Scrollbar
+        container = tk.Frame(self.janela_fila, bg="#F8FAFC")
+        container.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+
+        canvas = tk.Canvas(container, bg="#F8FAFC", highlightthickness=0)
+        scrollbar = tk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        self.frame_itens_fila = tk.Frame(canvas, bg="#F8FAFC")
+
+        self.frame_itens_fila.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        canvas_window = canvas.create_window((0, 0), window=self.frame_itens_fila, anchor="nw")
+        
+        def _on_canvas_configure(e):
+            canvas.itemconfig(canvas_window, width=e.width)
+        canvas.bind("<Configure>", _on_canvas_configure)
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        def _on_mousewheel(e):
+            try:
+                canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+            except Exception:
+                pass
+        self.janela_fila.bind("<MouseWheel>", _on_mousewheel)
+
+        canvas.pack(side="left", fill=tk.BOTH, expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # Barra de rodapé com ações globais
+        footer = tk.Frame(self.janela_fila, bg="#FFFFFF", highlightbackground="#CBD5E1", highlightthickness=1, padx=8, pady=6)
+        footer.pack(fill=tk.X, padx=8, pady=(4, 8))
+
+        btn_atualizar = tk.Button(footer, text="🔄 Atualizar da Tela", font=("Segoe UI", 8, "bold"), bg="#E0F2FE", fg="#0369A1", activebackground="#BAE6FD", relief="flat", padx=8, pady=3, cursor="hand2", command=lambda: self.atualizar_fila_pedidos_async(dar_f5=False))
+        btn_atualizar.pack(side="left", padx=2)
+
+        btn_limpar = tk.Button(footer, text="🧹 Limpar Fila", font=("Segoe UI", 8), bg="#FEE2E2", fg="#991B1B", activebackground="#FCA5A5", relief="flat", padx=8, pady=3, cursor="hand2", command=self._limpar_toda_fila)
+        btn_limpar.pack(side="left", padx=2)
+
+        btn_fechar = tk.Button(footer, text="✖️ Fechar", font=("Segoe UI", 8), bg="#E2E8F0", fg="#334155", activebackground="#CBD5E1", relief="flat", padx=8, pady=3, cursor="hand2", command=self.janela_fila.destroy)
+        btn_fechar.pack(side="right", padx=2)
+
+        self._renderizar_itens_janela_fila()
+
+    def _renderizar_itens_janela_fila(self):
+        if not hasattr(self, 'frame_itens_fila') or not self.frame_itens_fila.winfo_exists():
+            return
+        
+        for w in self.frame_itens_fila.winfo_children():
+            w.destroy()
+            
+        pedidos = self._sanitizar_lista_pedidos(getattr(self, 'pedidos_nao_lidos', []))
+        total = len(pedidos)
+        
+        if hasattr(self, 'lbl_janela_fila_sub') and self.lbl_janela_fila_sub.winfo_exists():
+            pag = getattr(self, 'pagina_atual_weg', 1)
+            self.lbl_janela_fila_sub.config(text=f"Total: {total} pedido(s) pendente(s) • Pág. {pag} • Do mais antigo ao mais novo")
+            
+        if not pedidos:
+            empty_card = tk.Frame(self.frame_itens_fila, bg="#FFFFFF", highlightbackground="#E2E8F0", highlightthickness=1, padx=15, pady=20)
+            empty_card.pack(fill=tk.X, padx=10, pady=15)
+            tk.Label(empty_card, text="✅ Fila Vazia", font=("Segoe UI", 11, "bold"), fg="#166534", bg="#FFFFFF").pack()
+            tk.Label(empty_card, text="Nenhum pedido 'Não lido' pendente no momento.", font=("Segoe UI", 9), fg="#64748B", bg="#FFFFFF").pack(pady=(4, 8))
+            tk.Button(empty_card, text="🔄 Buscar Pedidos da Tela", font=("Segoe UI", 9, "bold"), bg="#0284C7", fg="white", activebackground="#0369A1", relief="flat", padx=10, pady=4, cursor="hand2", command=lambda: self.atualizar_fila_pedidos_async(dar_f5=False)).pack()
+            return
+
+        for idx, num in enumerate(pedidos):
+            is_first = (idx == 0)
+            bg_card = "#FFFFFF"
+            border_color = "#16A34A" if is_first else "#E2E8F0"
+            
+            card = tk.Frame(self.frame_itens_fila, bg=bg_card, highlightbackground=border_color, highlightthickness=2 if is_first else 1, padx=8, pady=6)
+            card.pack(fill=tk.X, padx=10, pady=3)
+            
+            if is_first:
+                badge = tk.Label(card, text="1º [PRÓXIMO]", font=("Segoe UI", 8, "bold"), bg="#DCFCE7", fg="#15803D", padx=6, pady=2)
+            else:
+                badge = tk.Label(card, text=f"{idx + 1}º", font=("Segoe UI", 8, "bold"), bg="#F1F5F9", fg="#475569", padx=6, pady=2)
+            badge.pack(side="left", padx=(0, 8))
+            
+            lbl_num = tk.Label(card, text=num, font=("Segoe UI", 11, "bold"), fg="#0F172A", bg=bg_card)
+            lbl_num.pack(side="left")
+            
+            btn_remover = tk.Button(card, text="❌", font=("Segoe UI", 8), bg="#FEE2E2", fg="#DC2626", activebackground="#FCA5A5", relief="flat", padx=5, pady=1, cursor="hand2", command=lambda n=num: self._remover_pedido_da_fila(n))
+            btn_remover.pack(side="right", padx=(4, 0))
+            
+            btn_exec = tk.Button(card, text="▶️ Fazer", font=("Segoe UI", 8, "bold"), bg="#2563EB", fg="white", activebackground="#1D4ED8", activeforeground="white", relief="flat", padx=8, pady=1, cursor="hand2", command=lambda n=num: self._executar_pedido_especifico_da_fila(n))
+            btn_exec.pack(side="right")
+
+    def _remover_pedido_da_fila(self, numero):
+        if hasattr(self, 'pedidos_nao_lidos') and numero in self.pedidos_nao_lidos:
+            self.pedidos_nao_lidos.remove(numero)
+            self._sincronizar_ui_fila_pedidos()
+
+    def _limpar_toda_fila(self):
+        self.pedidos_nao_lidos = []
+        self._sincronizar_ui_fila_pedidos()
+
+    def _executar_pedido_especifico_da_fila(self, numero):
+        if hasattr(self, 'janela_fila') and self.janela_fila and self.janela_fila.winfo_exists():
+            self.janela_fila.destroy()
+        self.entry_pedido.delete(0, tk.END)
+        self.entry_pedido.insert(0, numero)
+        self.iniciar_processamento_pedido(numero)
+
     # --- PAINEL DE CONTROLE COMPACTO, INFERIOR E TRANSLÚCIDO ---
     def criar_painel_controle(self):
         self.root.deiconify()
         self.root.configure(bg="#F8FAFC")
-        self.posicionar_painel_embaixo(270, 275)
+        self.posicionar_painel_embaixo(330, 310)
         
         # Aplica a transparência suave (85%) para enxergar o conteúdo atrás
         if getattr(self, 'transparencia_ativa', True):
@@ -792,25 +996,39 @@ class AutomacaoPedidosApp:
         lbl_portal = tk.Label(top_row, text=f"🟢 {nome_local}", font=("Segoe UI", 8, "bold"), fg="#15803D", bg="#DCFCE7", padx=6, pady=1)
         lbl_portal.pack(side="right")
 
-        # Body Frame estreito e enxuto
+        # Body Frame com caixinha maior e visualizador de fila
         body = tk.Frame(self.root, bg="#F8FAFC", padx=8)
         body.pack(fill=tk.BOTH, expand=True)
 
         status_frame = tk.Frame(body, bg="#F8FAFC")
-        status_frame.pack(fill=tk.X, pady=(2, 1))
+        status_frame.pack(fill=tk.X, pady=(2, 2))
 
         self.lbl_fila_pedidos = tk.Label(status_frame, text="📋 Nº do Pedido WEG:", font=("Segoe UI", 8, "bold"), fg="#1E293B", bg="#F8FAFC")
         self.lbl_fila_pedidos.pack(side="left")
 
-        self.btn_atualizar_fila = tk.Button(status_frame, text="🔄 Atualizar", font=("Segoe UI", 7, "bold"), bg="#E0F2FE", fg="#0369A1", activebackground="#BAE6FD", relief="flat", padx=4, pady=0, cursor="hand2", command=lambda: self.atualizar_fila_pedidos_async(dar_f5=False))
+        self.btn_atualizar_fila = tk.Button(status_frame, text="🔄 Atualizar", font=("Segoe UI", 7, "bold"), bg="#E0F2FE", fg="#0369A1", activebackground="#BAE6FD", relief="flat", padx=3, pady=1, cursor="hand2", command=lambda: self.atualizar_fila_pedidos_async(dar_f5=False))
         self.btn_atualizar_fila.pack(side="right")
         self.btn_atualizar_fila.bind("<Button-3>", lambda e: self.atualizar_fila_pedidos_async(dar_f5=True))
 
-        self.btn_pag2 = tk.Button(status_frame, text="📄 Pág 2", font=("Segoe UI", 7, "bold"), bg="#FEF3C7", fg="#92400E", activebackground="#FDE68A", relief="flat", padx=3, pady=0, cursor="hand2", command=self.carregar_pagina_2_async)
+        self.btn_pag2 = tk.Button(status_frame, text="📄 Pág 2", font=("Segoe UI", 7, "bold"), bg="#FEF3C7", fg="#92400E", activebackground="#FDE68A", relief="flat", padx=3, pady=1, cursor="hand2", command=self.carregar_pagina_2_async)
         self.btn_pag2.pack(side="right", padx=(0, 2))
 
-        self.entry_pedido = tk.Entry(body, font=("Segoe UI", 12, "bold"), justify="center", bg="#FFFFFF", fg="#0F172A", relief="solid", bd=1)
-        self.entry_pedido.pack(fill=tk.X, pady=(1, 1), ipady=2)
+        self.btn_ver_fila = tk.Button(status_frame, text="📋 Fila (0)", font=("Segoe UI", 7, "bold"), bg="#EDE9FE", fg="#6D28D9", activebackground="#DDD6FE", relief="flat", padx=3, pady=1, cursor="hand2", command=self.abrir_janela_fila_pedidos)
+        self.btn_ver_fila.pack(side="right", padx=(0, 2))
+
+        # Caixinha maiorzinha (Entry com font 14 e ipady=5)
+        self.entry_pedido = tk.Entry(
+            body, 
+            font=("Segoe UI", 14, "bold"), 
+            justify="center", 
+            bg="#FFFFFF", 
+            fg="#0F172A", 
+            relief="solid", 
+            bd=2, 
+            highlightthickness=1, 
+            highlightcolor="#2563EB"
+        )
+        self.entry_pedido.pack(fill=tk.X, pady=(2, 2), ipady=5)
         self.entry_pedido.focus()
         self.entry_pedido.bind("<Return>", lambda event: self.processar_pedido())
 
@@ -2284,13 +2502,14 @@ class AutomacaoPedidosApp:
     # --- LÓGICA DE PROCESSAMENTO SUBSTITUINDO O LOOP ETERNO ---
     def processar_proximo_fila(self):
         """Processa diretamente o próximo pedido sugerido da fila (o mais antigo)."""
-        pedidos = getattr(self, 'pedidos_nao_lidos', [])
+        pedidos = self._sanitizar_lista_pedidos(getattr(self, 'pedidos_nao_lidos', []))
         if not pedidos:
             # Tenta varredura dinâmica na tela atual antes de emitir aviso
             try:
                 res = self.extrair_pedidos_nao_lidos_portal()
-                novos = res.get("pedidos", [])
+                novos = self._sanitizar_lista_pedidos(res.get("pedidos", []))
                 if novos:
+                    novos.sort(key=lambda x: int(x))
                     self.pedidos_nao_lidos = novos
                     self._sincronizar_ui_fila_pedidos()
                     pedidos = self.pedidos_nao_lidos
@@ -2346,6 +2565,8 @@ class AutomacaoPedidosApp:
             self.btn_atualizar_fila.config(state=tk.DISABLED)
         if hasattr(self, 'btn_pag2'):
             self.btn_pag2.config(state=tk.DISABLED)
+        if hasattr(self, 'btn_ver_fila'):
+            self.btn_ver_fila.config(state=tk.DISABLED)
         self.entry_pedido.config(state=tk.DISABLED)
         
         t = threading.Thread(target=self._executar_processo_pedido, daemon=True)
@@ -2365,6 +2586,8 @@ class AutomacaoPedidosApp:
             self.btn_atualizar_fila.config(state=tk.NORMAL)
         if hasattr(self, 'btn_pag2'):
             self.btn_pag2.config(state=tk.NORMAL)
+        if hasattr(self, 'btn_ver_fila'):
+            self.btn_ver_fila.config(state=tk.NORMAL)
         self.entry_pedido.config(state=tk.NORMAL)
         
         # Sincroniza a interface com a fila atualizada de pedidos
@@ -2524,16 +2747,7 @@ class AutomacaoPedidosApp:
             # Recarrega a página da WEG (F5) para atualizar status ('Não lida' vira 'Confirmado') e puxar próximos
             try:
                 print("Atualizando página da WEG (F5) para obter próximos pedidos 'Não lido'...")
-                self.driver_weg.refresh()
-                try:
-                    WebDriverWait(self.driver_weg, 10).until(
-                        EC.presence_of_element_located((By.XPATH, "//table//tbody/tr"))
-                    )
-                except Exception:
-                    pass
-                time.sleep(0.4)
-                novos_nao_lidos = self.extrair_pedidos_nao_lidos_portal()
-                self.pedidos_nao_lidos = novos_nao_lidos
+                self.atualizar_fila_pedidos(dar_f5=True)
                 print(f"Pedidos 'Não lido' restantes na fila: {self.pedidos_nao_lidos}")
             except Exception as _e_ref:
                 print(f"Aviso ao atualizar lista WEG pós-pedido: {_e_ref}")
