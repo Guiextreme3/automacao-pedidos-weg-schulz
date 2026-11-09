@@ -185,6 +185,8 @@ class AutomacaoPedidosApp:
         self.itens_preco_maior = []
         self.numeros_pedidos_lf_gerados = []
         self.pedidos_nao_lidos = []
+        self.pedidos_coletados = []
+        self.pedidos_concluidos = set()
         self.mapa_descricoes_lf = {}
         self.pagina_atual_weg = 1
         self.total_paginas_weg = 1
@@ -561,8 +563,8 @@ class AutomacaoPedidosApp:
                 });
             }
 
-            // Varre de baixo para cima (do último da lista pro primeiro na página atual)
-            for (var i = rows.length - 1; i >= 0; i--) {
+            // Varre de cima para baixo (do primeiro para o último da tabela visível)
+            for (var i = 0; i < rows.length; i++) {
                 var row = rows[i];
                 var text = (row.innerText || "").toLowerCase();
                 if (text.indexOf("não lida") === -1 && text.indexOf("nao lida") === -1 &&
@@ -601,12 +603,12 @@ class AutomacaoPedidosApp:
         except Exception as e:
             print(f"Aviso ao extrair pedidos não lidos via JS: {e}")
 
-        # Fallback via Selenium (varre de baixo para cima)
+        # Fallback via Selenium (varre de cima para baixo)
         if not resultado["pedidos"]:
             try:
                 self.driver_weg.switch_to.default_content()
                 rows = self.driver_weg.find_elements(By.XPATH, "//table//tbody/tr")
-                for r in reversed(rows):
+                for r in rows:
                     try:
                         txt = r.text.lower()
                         if any(k in txt for k in ["não lida", "nao lida", "não lido", "nao lido"]):
@@ -632,7 +634,10 @@ class AutomacaoPedidosApp:
 
     def atualizar_fila_pedidos(self, dar_f5=False):
         """Atualiza a lista interna de pedidos 'Não lido' e sincroniza a interface.
-        Se dar_f5=False, lê a tela atual sem resetar a navegação/página do usuário."""
+        Se dar_f5=False, lê a tela atual sem resetar a navegação/página do usuário.
+        Varre de cima para baixo na tabela visível. Novos pedidos são adicionados ao final
+        da lista acumulada (se já existirem, são ignorados).
+        A fila de execução é feita do último coletado para o primeiro (pois o último é o mais antigo)."""
         if not getattr(self, 'driver_weg', None):
             return
         try:
@@ -665,23 +670,31 @@ class AutomacaoPedidosApp:
                 time.sleep(0.4)
 
             dados_extracao = self.extrair_pedidos_nao_lidos_portal()
-            pedidos_lidos = self._sanitizar_lista_pedidos(dados_extracao.get("pedidos", []))
+            pedidos_pagina = self._sanitizar_lista_pedidos(dados_extracao.get("pedidos", []))
             pagina = dados_extracao.get("pagina", 1)
             self.total_paginas_weg = dados_extracao.get("total_paginas", 1)
             self.pagina_atual_weg = pagina
 
-            fila_atual = self._sanitizar_lista_pedidos(getattr(self, 'pedidos_nao_lidos', []))
-            
-            # Combina pedidos lidos da tela com os já existentes na fila sem duplicatas
-            combinados = pedidos_lidos + [p for p in fila_atual if p not in pedidos_lidos]
-            
-            # Ordena estritamente do menor para o maior (do mais antigo para o mais novo).
-            # Na WEG, números de pedido são sequenciais de 10 dígitos (45...).
-            # O menor número é SEMPRE o pedido mais antigo gerado, garantindo 100% que
-            # a execução seja do último da lista para o primeiro na tela!
-            self.pedidos_nao_lidos = sorted(combinados, key=lambda x: int(x))
+            if not hasattr(self, 'pedidos_coletados') or self.pedidos_coletados is None:
+                self.pedidos_coletados = []
+            if not hasattr(self, 'pedidos_concluidos') or self.pedidos_concluidos is None:
+                self.pedidos_concluidos = set()
 
-            print(f"Fila atualizada (Página {pagina} de {self.total_paginas_weg}) [Mais antigo primeiro]: {self.pedidos_nao_lidos}")
+            # Adiciona pedidos não lidos da tela ao final da lista coletada (se já tiver, só ignora)
+            novos_adicionados = []
+            for p in pedidos_pagina:
+                if p not in self.pedidos_coletados and p not in self.pedidos_concluidos:
+                    self.pedidos_coletados.append(p)
+                    novos_adicionados.append(p)
+
+            # Execução: do último coletado para o primeiro (pois o último da lista acumulada é o mais antigo)
+            self.pedidos_nao_lidos = [p for p in reversed(self.pedidos_coletados) if p not in self.pedidos_concluidos]
+
+            print(f"Fila atualizada (Página {pagina} de {self.total_paginas_weg})")
+            if novos_adicionados:
+                print(f"  > Novos pedidos adicionados ao final da lista: {novos_adicionados}")
+            print(f"  > Pedidos acumulados (cima pra baixo): {self.pedidos_coletados}")
+            print(f"  > Fila de execução (do último pro primeiro): {self.pedidos_nao_lidos}")
         except Exception as e:
             print(f"Aviso ao buscar pedidos não lidos: {e}")
         finally:
@@ -769,6 +782,14 @@ class AutomacaoPedidosApp:
 
     def _sincronizar_ui_fila_pedidos(self):
         """Atualiza a caixa de texto, rótulos e os botões da interface conforme a fila pendente."""
+        if not hasattr(self, 'pedidos_concluidos') or self.pedidos_concluidos is None:
+            self.pedidos_concluidos = set()
+        if not hasattr(self, 'pedidos_coletados') or self.pedidos_coletados is None:
+            self.pedidos_coletados = []
+
+        # Mantém a fila sincronizada na ordem inversa da coleta (do último pro primeiro)
+        if self.pedidos_coletados:
+            self.pedidos_nao_lidos = [p for p in reversed(self.pedidos_coletados) if p not in self.pedidos_concluidos]
         self.pedidos_nao_lidos = self._sanitizar_lista_pedidos(getattr(self, 'pedidos_nao_lidos', []))
         pedidos = self.pedidos_nao_lidos
         total = len(pedidos)
@@ -941,10 +962,17 @@ class AutomacaoPedidosApp:
     def _remover_pedido_da_fila(self, numero):
         if hasattr(self, 'pedidos_nao_lidos') and numero in self.pedidos_nao_lidos:
             self.pedidos_nao_lidos.remove(numero)
-            self._sincronizar_ui_fila_pedidos()
+        if hasattr(self, 'pedidos_coletados') and numero in self.pedidos_coletados:
+            self.pedidos_coletados.remove(numero)
+        if not hasattr(self, 'pedidos_concluidos') or self.pedidos_concluidos is None:
+            self.pedidos_concluidos = set()
+        self.pedidos_concluidos.add(numero)
+        self._sincronizar_ui_fila_pedidos()
 
     def _limpar_toda_fila(self):
         self.pedidos_nao_lidos = []
+        self.pedidos_coletados = []
+        self.pedidos_concluidos = set()
         self._sincronizar_ui_fila_pedidos()
 
     def _executar_pedido_especifico_da_fila(self, numero):
@@ -1084,6 +1112,8 @@ class AutomacaoPedidosApp:
         """Fecha o portal WEG atual e loga no portal escolhido, mantendo o LF."""
         try:
             self.pedidos_nao_lidos = []
+            self.pedidos_coletados = []
+            self.pedidos_concluidos = set()
             if hasattr(self, 'btn_proximo'):
                 self.btn_proximo.config(state=tk.DISABLED, text="Conectando...")
             if hasattr(self, 'btn_digitado'):
@@ -2551,6 +2581,11 @@ class AutomacaoPedidosApp:
         # Se o pedido estava na lista de não lidos, remove para avançar a fila
         if hasattr(self, 'pedidos_nao_lidos') and numero in self.pedidos_nao_lidos:
             self.pedidos_nao_lidos.remove(numero)
+        if hasattr(self, 'pedidos_coletados') and numero in self.pedidos_coletados:
+            self.pedidos_coletados.remove(numero)
+        if not hasattr(self, 'pedidos_concluidos') or self.pedidos_concluidos is None:
+            self.pedidos_concluidos = set()
+        self.pedidos_concluidos.add(numero)
         
         # Desativa a interface para evitar duplo clique
         if hasattr(self, 'btn_proximo'):
