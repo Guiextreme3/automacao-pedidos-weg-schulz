@@ -2178,6 +2178,7 @@ class AutomacaoPedidosApp:
         try:
             creds_weg = CREDENCIAIS["WEG_JVE"] if self.local_weg_escolhido == "JVE" else CREDENCIAIS["WEG_DI"]
             creds_lf = CREDENCIAIS["LF"]
+            url_weg = URL_PORTAL_WEG_JVE if self.local_weg_escolhido == "JVE" else URL_PORTAL_WEG_DI
             
             print("Iniciando Portal LF...")
             chrome_options_lf = webdriver.ChromeOptions()
