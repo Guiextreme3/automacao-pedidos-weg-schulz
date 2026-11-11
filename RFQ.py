@@ -10,6 +10,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from datetime import datetime, timedelta
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
+from selenium.common.exceptions import TimeoutException, UnexpectedAlertPresentException, WebDriverException
 import threading
 import openpyxl
 import os
@@ -275,7 +276,20 @@ def run_automation(single_mode, username, password, test_row_num, login_type, co
     try:
         options = Options()
         options.add_argument("--start-maximized")
+        # Estratégia 'eager': carrega o DOM imediatamente sem travar esperando scripts de rastreamento/banners
+        options.page_load_strategy = 'eager'
+        # Evita que o Chrome congele quando a janela estiver em segundo plano
+        options.add_argument("--disable-background-timer-throttling")
+        options.add_argument("--disable-backgrounding-occluded-windows")
+        options.add_argument("--disable-renderer-backgrounding")
+        options.add_argument("--disable-features=CalculateWindowOcclusion")
+        # Aceita automaticamente quaisquer alertas pendentes para não travar o ChromeDriver
+        options.set_capability("unhandledPromptBehavior", "accept")
+
         driver = webdriver.Chrome(options=options)
+        driver.set_page_load_timeout(35)
+        driver.set_script_timeout(30)
+
         main_automation_logic(rfq_spreadsheet_path, product_spreadsheet_path, driver, single_mode, username, password, test_row_num, login_type, col_link_str, col_code_str, row_start)
     except Exception as e:
         if "main_automation_logic" not in str(e):
@@ -283,7 +297,10 @@ def run_automation(single_mode, username, password, test_row_num, login_type, co
             print(f"Erro Detalhado: {e}")
     finally:
         if driver:
-            driver.quit()
+            try:
+                driver.quit()
+            except Exception:
+                pass
         root.after(0, lambda: set_gui_state(tk.NORMAL))
 
 def load_product_data_from_pdf(pdf_path):
@@ -695,6 +712,55 @@ def show_custom_choice_dialog(title, prompt, aviso=None):
     event.wait()
     return result["choice"]
 
+def navegar_com_timeout(driver, url, max_tentativas=2):
+    """Navega para a URL da RFQ tratando alertas pendentes e timeouts sem derrubar a sessão."""
+    for tentativa in range(1, max_tentativas + 1):
+        # Fecha qualquer alerta remanescente da cotação anterior antes de navegar
+        for _ in range(3):
+            try:
+                alert = driver.switch_to.alert
+                txt_a = alert.text
+                alert.accept()
+                print(f"   > Alerta pendente fechado antes da navegação: '{txt_a}'")
+                time.sleep(0.3)
+            except Exception:
+                break
+
+        # Garante foco na janela principal e fecha abas extras se houver
+        try:
+            if len(driver.window_handles) > 1:
+                main_h = driver.window_handles[0]
+                for extra_h in driver.window_handles[1:]:
+                    driver.switch_to.window(extra_h)
+                    driver.close()
+                driver.switch_to.window(main_h)
+        except Exception:
+            pass
+
+        try:
+            print(f"   > Carregando RFQ (tentativa {tentativa}/{max_tentativas})...")
+            driver.get(url)
+            return True
+        except TimeoutException:
+            print(f"   ⚠️ Tempo de carregamento excedeu 35s. Parando scripts em segundo plano para prosseguir...")
+            try:
+                driver.execute_script("window.stop();")
+            except Exception:
+                pass
+            return True
+        except Exception as e:
+            msg = str(e)
+            print(f"   ⚠️ Erro de rede/carregamento ({tentativa}/{max_tentativas}): {msg}")
+            try:
+                driver.execute_script("window.stop();")
+            except Exception:
+                pass
+            if tentativa < max_tentativas:
+                time.sleep(2)
+            else:
+                raise
+    return False
+
 # --- Lógica de Automação Web ---
 def main_automation_logic(rfq_path, product_path, driver, single_mode, username, password, test_row_num, login_type, col_link_str, col_code_str, row_start):
     product_data = load_product_data_from_spreadsheet(product_path, login_type)
@@ -752,11 +818,11 @@ def main_automation_logic(rfq_path, product_path, driver, single_mode, username,
         messagebox.showinfo("Erro", f"Linha {test_row_num} inválida.")
         return
 
-    wait = WebDriverWait(driver, 3)
+    wait = WebDriverWait(driver, 10)
     
     for task_idx, task in enumerate(tasks_to_process):
         print(f"\nProcessando RFQ Linha {task['row_num']}...")
-        driver.get(task['link'])
+        navegar_com_timeout(driver, task['link'])
 
         # Login
         try:
@@ -1134,25 +1200,28 @@ def main_automation_logic(rfq_path, product_path, driver, single_mode, username,
                 except Exception as e_click:
                     print(f"   ⚠️ Não foi possível clicar no botão 'Confirmar': {e_click}")
             
-            # Tratar popup de confirmação
-            time.sleep(1.0)
-            popup_sucesso = False
-            try:
-                alert = driver.switch_to.alert
-                alert_text = alert.text
-                alert.accept()
-                print(f"   > Alerta do navegador aceito: '{alert_text}'")
-                popup_sucesso = True
-            except:
-                pass
+            # Tratar popups de confirmação (pode haver mais de um: 1º 'Deseja confirmar?' e 2º 'Cotação enviada com sucesso!')
+            print("   > Aguardando confirmação do portal...")
+            alertas_tratados = 0
+            fim_espera = time.time() + 6.0
+            while time.time() < fim_espera and alertas_tratados < 3:
+                try:
+                    alert = driver.switch_to.alert
+                    alert_text = alert.text
+                    alert.accept()
+                    alertas_tratados += 1
+                    print(f"   > Alerta do navegador #{alertas_tratados} aceito: '{alert_text}'")
+                    time.sleep(0.8)
+                except Exception:
+                    time.sleep(0.4)
             
-            if not popup_sucesso:
+            if alertas_tratados == 0:
                 try:
                     ActionChains(driver).send_keys(Keys.ENTER).perform()
                     print("   > Tecla ENTER enviada para confirmação do popup.")
-                except:
+                except Exception:
                     pass
-            time.sleep(1.5) # Aguarda processamento do envio no portal
+            time.sleep(2.0) # Aguarda processamento do envio no portal
             
         elif escolha == "next":
             print("Pulando para a próxima RFQ sem confirmar/enviar.")
